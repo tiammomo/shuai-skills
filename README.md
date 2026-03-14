@@ -36,6 +36,8 @@
 
 - [docs/README.md](./docs/README.md)：文档总览。
 - [docs/yuque-openapi.md](./docs/yuque-openapi.md)：`yuque-openapi` 的详细能力、作用、适用场景和工作流说明。
+- [docs/skill-authoring.md](./docs/skill-authoring.md)：如何在本仓库中制作新的 skill。
+- [docs/skill-spec.md](./docs/skill-spec.md)：skills 的结构规范、命名规范和编写约束。
 - [skills/yuque-openapi/SKILL.md](./skills/yuque-openapi/SKILL.md)：skill 原始定义。
 
 ## 仓库结构

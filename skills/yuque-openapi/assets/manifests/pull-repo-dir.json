@@ -1,0 +1,9 @@
+{
+  "operations": [
+    {
+      "command": "pull-dir-markdown",
+      "repo": "<namespace>/<repo>",
+      "output_dir": "./exports/<repo>"
+    }
+  ]
+}

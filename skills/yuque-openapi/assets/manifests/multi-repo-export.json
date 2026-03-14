@@ -1,0 +1,17 @@
+{
+  "continue_on_error": true,
+  "operations": [
+    {
+      "command": "export-repo-markdown",
+      "repo": "<namespace>/<repo-a>",
+      "output_dir": "./exports/<repo-a>",
+      "front_matter": true
+    },
+    {
+      "command": "export-repo-markdown",
+      "repo": "<namespace>/<repo-b>",
+      "output_dir": "./exports/<repo-b>",
+      "front_matter": true
+    }
+  ]
+}

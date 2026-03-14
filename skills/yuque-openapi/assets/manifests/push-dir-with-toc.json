@@ -1,0 +1,10 @@
+{
+  "operations": [
+    {
+      "command": "push-dir-markdown",
+      "repo": "<namespace>/<repo>",
+      "source_dir": "./docs/<repo>",
+      "sync_toc": true
+    }
+  ]
+}

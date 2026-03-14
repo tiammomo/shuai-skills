@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yuque OpenAPI"
+  short_description: "Sync Markdown with Yuque, restore snapshots, and manage TOCs."
+  default_prompt: "Use $yuque-openapi to sync local markdown with Yuque, restore repo snapshots, rebuild repo TOCs, or run incremental manifest-based sync workflows via OpenAPI."

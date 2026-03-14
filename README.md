@@ -121,3 +121,7 @@ skill 可以理解为一个面向 Codex 或 agent 的“能力包”。它不是
 - 在 `skills/<skill-name>/` 下维护 skill 本体。
 - 在 `docs/` 下补对应说明或教程入口。
 - 在本 README 中补一行 skill 简介和文档链接。
+
+## License
+
+本仓库采用 Apache License 2.0 开源协议。完整内容见 [LICENSE](./LICENSE)。

@@ -20,6 +20,10 @@ def default_validator_path() -> Path:
     return codex_home / "skills" / ".system" / "skill-creator" / "scripts" / "quick_validate.py"
 
 
+def resolve_validator_path(raw_path: str) -> Path:
+    return Path(raw_path).expanduser().resolve()
+
+
 def run_step(label: str, command: List[str]) -> None:
     print(f"==> {label}")
     completed = subprocess.run(
@@ -52,7 +56,7 @@ def main() -> int:
         run_step("Offline self-tests", [sys.executable, str(SELFTEST)])
 
     if not args.skip_validate:
-        validator_path = Path(args.validator)
+        validator_path = resolve_validator_path(args.validator)
         if not validator_path.exists():
             raise SystemExit(f"Validator script not found: {validator_path}. Pass --validator or --skip-validate.")
         run_step("Skill validation", [sys.executable, str(validator_path), str(SKILL_DIR)])

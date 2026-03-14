@@ -1,0 +1,15 @@
+# Skills 文档总览
+
+`docs/` 用来存放对仓库内 skills 的详细说明，重点解释每个 skill 的定位、能力边界、适用场景和推荐工作流。
+
+## 当前文档
+
+- [yuque-openapi.md](./yuque-openapi.md)：详细介绍 `yuque-openapi` skill 的具体能力、作用、常见使用场景和安全注意事项。
+
+## 阅读建议
+
+如果你是第一次接触这个仓库，建议按下面顺序阅读：
+
+1. 先看仓库首页 [../README.md](../README.md)，快速了解当前有哪些 skills。
+2. 再看 [yuque-openapi.md](./yuque-openapi.md)，了解这个 skill 在语雀同步场景里具体能做什么。
+3. 如果要直接落地执行，再打开 [../skills/yuque-openapi/SKILL.md](../skills/yuque-openapi/SKILL.md) 和对应 `references/` 获取命令细节。

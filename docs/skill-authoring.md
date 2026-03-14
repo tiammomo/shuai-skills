@@ -5,7 +5,7 @@
 - 一个 skill 应该怎么从 0 到 1 做出来。
 - 在这个仓库里，推荐按什么顺序推进，才能让 skill 可复用、可维护、可验证。
 
-如果你想先看规则和约束，再回来看操作步骤，可以搭配 [skill-spec.md](./skill-spec.md) 一起读。
+如果你想先看规则和约束，再回来看操作步骤，可以搭配 [skill-spec.md](./skill-spec.md) 一起读；如果你只想先快速做出一个最小版本，可以先看 [skill-quickstart.md](./skill-quickstart.md)。
 
 ## 先理解：skill 不是普通文档
 
@@ -135,6 +135,65 @@ python <CODEX_HOME>/skills/.system/skill-creator/scripts/init_skill.py my-skill 
 - `display_name` 给出人类可读名称。
 - `short_description` 用一句话说明核心能力。
 - `default_prompt` 会直接引导用户如何调用 skill，而且要显式提到 `$skill-name`。
+
+## 一个最小可复制模板
+
+如果你想先快速起一个可用骨架，再慢慢补细节，可以直接复制下面这两段。
+
+### `SKILL.md` 最小模板
+
+```markdown
+---
+name: my-skill
+description: Briefly describe what this skill does and when Codex should use it. Mention the task type, files, tools, or user requests that should trigger it.
+---
+
+# My Skill
+
+Use this skill to handle the target workflow in a repeatable way.
+
+## Safety First
+
+- State any important safety or confirmation rules here.
+- Mention any secrets, destructive actions, or irreversible changes that need extra care.
+
+## Task Router
+
+- For the main workflow:
+  Read `references/main-workflow.md` if it exists.
+- For deterministic execution:
+  Run `scripts/my_tool.py` if it exists.
+
+## Default Workflow
+
+1. Check the target input, environment, or files.
+2. Choose the smallest safe action.
+3. Run the main workflow.
+4. Validate the result before finishing.
+
+## Bundled Resources
+
+- `scripts/`: executable helpers for repeated or fragile tasks.
+- `references/`: detailed materials that should be loaded only when needed.
+- `assets/`: templates or output resources.
+```
+
+### `agents/openai.yaml` 最小模板
+
+```yaml
+interface:
+  display_name: "My Skill"
+  short_description: "Short human-facing summary of the skill."
+  default_prompt: "Use $my-skill to handle the target workflow in a safe, repeatable way."
+```
+
+### 使用这个模板时，至少替换这些占位内容
+
+- 把 `my-skill` 换成真实 skill 名，保持和目录名一致。
+- 把 `description` 改成“做什么 + 什么时候用”的明确描述，不要留成泛话。
+- 把标题、默认工作流和资源说明改成真实任务。
+- 如果没有 `references/` 或 `scripts/`，就把对应说明删掉，不要保留空导航。
+- 把 `default_prompt` 改成真实调用语句，并显式包含 `$skill-name`。
 
 ### 7. 验证 skill 结构
 

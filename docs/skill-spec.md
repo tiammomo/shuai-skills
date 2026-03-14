@@ -214,7 +214,53 @@ interface:
 
 当前 [`skills/yuque-openapi/agents/openai.yaml`](../skills/yuque-openapi/agents/openai.yaml) 可以作为一个简单参考。
 
-## 12. 不要往 skill 目录里放什么
+## 12. 符合规范的最小模板
+
+如果你只是想先写一个“结构合法、能继续迭代”的最小版本，可以直接从下面开始。
+
+### 最小 `SKILL.md`
+
+```markdown
+---
+name: my-skill
+description: Describe what the skill does and when Codex should use it. Include the task, context, file type, tool, or user request patterns that should trigger it.
+---
+
+# My Skill
+
+Use this skill for the target workflow.
+
+## Task Router
+
+- For the main workflow:
+  Read `references/main.md` if needed.
+
+## Default Workflow
+
+1. Inspect the target context.
+2. Choose the smallest safe action.
+3. Execute the workflow.
+4. Validate the result.
+```
+
+### 最小 `agents/openai.yaml`
+
+```yaml
+interface:
+  display_name: "My Skill"
+  short_description: "Short UI summary of the skill."
+  default_prompt: "Use $my-skill to handle the target workflow."
+```
+
+### 这个最小模板要满足的规范
+
+- `name` 必须是小写连字符形式。
+- `description` 不能只写空泛介绍，必须写触发场景。
+- `default_prompt` 必须显式提到 `$my-skill` 这种 skill 调用形式。
+- YAML 字符串值要加引号，键名不要加引号。
+- 如果没有 `references/`、`scripts/`、`assets/`，不要在 skill 目录里硬放空文件。
+
+## 13. 不要往 skill 目录里放什么
 
 skill 目录内不建议放仓库式杂项文件，例如：
 
@@ -231,7 +277,7 @@ skill 目录内不建议放仓库式杂项文件，例如：
 
 如果你确实想写“给人看的说明”，更适合放在本仓库的 `docs/` 下，就像这篇文档这样。
 
-## 13. 验证规范
+## 14. 验证规范
 
 新增或修改 skill 后，至少建议做两类验证：
 
@@ -249,7 +295,7 @@ skill 目录内不建议放仓库式杂项文件，例如：
 
 如果 skill 足够复杂，最好像当前 `yuque-openapi` 一样，再提供一个统一检查入口。
 
-## 14. 本仓库内的推荐提交规范
+## 15. 本仓库内的推荐提交规范
 
 在这个仓库里维护 skill 时，比较推荐：
 
@@ -264,7 +310,7 @@ skill 目录内不建议放仓库式杂项文件，例如：
 - `docs/` 不会和 `skills/` 脱节。
 - 后续维护者更容易理解每个 skill 的边界。
 
-## 15. 一个可直接套用的检查清单
+## 16. 一个可直接套用的检查清单
 
 在提交前，可以快速自查：
 

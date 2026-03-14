@@ -5,6 +5,7 @@
 ## 当前文档
 
 - [yuque-openapi.md](./yuque-openapi.md)：详细介绍 `yuque-openapi` skill 的具体能力、作用、常见使用场景和安全注意事项。
+- [skill-quickstart.md](./skill-quickstart.md)：用最短路径快速做出一个可用的 skill。
 - [skill-authoring.md](./skill-authoring.md)：讲解如何在本仓库中从 0 到 1 制作一个新的 skill。
 - [skill-spec.md](./skill-spec.md)：整理 skills 的结构规范、命名规范、编写规范和维护建议。
 
@@ -14,5 +15,6 @@
 
 1. 先看仓库首页 [../README.md](../README.md)，快速了解当前有哪些 skills。
 2. 再看 [yuque-openapi.md](./yuque-openapi.md)，了解这个 skill 在语雀同步场景里具体能做什么。
-3. 如果你想继续扩展仓库能力，再看 [skill-authoring.md](./skill-authoring.md) 和 [skill-spec.md](./skill-spec.md)。
-4. 如果要直接落地执行，再打开 [../skills/yuque-openapi/SKILL.md](../skills/yuque-openapi/SKILL.md) 和对应 `references/` 获取命令细节。
+3. 如果你想快速新建一个 skill，先看 [skill-quickstart.md](./skill-quickstart.md)。
+4. 如果你想继续扩展仓库能力，再看 [skill-authoring.md](./skill-authoring.md) 和 [skill-spec.md](./skill-spec.md)。
+5. 如果要直接落地执行，再打开 [../skills/yuque-openapi/SKILL.md](../skills/yuque-openapi/SKILL.md) 和对应 `references/` 获取命令细节。

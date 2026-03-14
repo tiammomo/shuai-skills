@@ -36,9 +36,20 @@
 
 - [docs/README.md](./docs/README.md)：文档总览。
 - [docs/yuque-openapi.md](./docs/yuque-openapi.md)：`yuque-openapi` 的详细能力、作用、适用场景和工作流说明。
+- [docs/skill-quickstart.md](./docs/skill-quickstart.md)：快速上手创建一个新的 skill。
 - [docs/skill-authoring.md](./docs/skill-authoring.md)：如何在本仓库中制作新的 skill。
 - [docs/skill-spec.md](./docs/skill-spec.md)：skills 的结构规范、命名规范和编写约束。
 - [skills/yuque-openapi/SKILL.md](./skills/yuque-openapi/SKILL.md)：skill 原始定义。
+
+## 快速上手
+
+如果你想在这个仓库里快速新建一个 skill，可以直接按下面 3 步走：
+
+1. 运行 `init_skill.py` 在 `skills/` 下创建骨架目录。
+2. 用最小模板补好 `SKILL.md` 和 `agents/openai.yaml`。
+3. 运行 `quick_validate.py` 校验结构是否正确。
+
+完整步骤和可复制模板见 [docs/skill-quickstart.md](./docs/skill-quickstart.md)。
 
 ## 仓库结构
 

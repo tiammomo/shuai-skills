@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "relative_path": "notes.md",
+      "doc_token": "dox_replace_me",
+      "title": "Example Notes",
+      "sync_direction": "push"
+    }
+  ]
+}

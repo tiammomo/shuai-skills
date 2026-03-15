@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feishu Doc Sync"
+  short_description: "Validate Feishu auth and sync local Markdown with app-visible Feishu docs."
+  default_prompt: "Use $feishu-doc-sync to validate Feishu auth, push local Markdown into tenant-visible Feishu cloud docs, update feishu-index.json mappings, or continue extending the skill's tenant and user sync workflows."

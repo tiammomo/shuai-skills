@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "relative_path": "new-doc.md",
+      "title": "Project Kickoff Note",
+      "sync_direction": "push"
+    },
+    {
+      "relative_path": "existing-doc.md",
+      "doc_token": "dox_replace_me",
+      "folder_token": "fld_replace_if_needed",
+      "title": "Existing Feishu Doc",
+      "sync_direction": "push",
+      "content_hash": "sha256:replace_after_first_real_push",
+      "last_sync_at": "2026-03-15T00:00:00Z"
+    }
+  ]
+}

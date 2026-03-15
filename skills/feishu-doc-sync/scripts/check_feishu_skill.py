@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -49,6 +51,10 @@ def extract_json_object(text: str) -> dict:
     return json.loads(text[start:])
 
 
+def sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 class MockFeishuHandler(BaseHTTPRequestHandler):
     documents = {
         "dox-mock": {
@@ -56,21 +62,323 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
             "revision_id": 1,
             "children": ["blk-heading", "blk-paragraph"],
             "url": "https://example.test/docx/dox-mock",
+            "raw_content": "Mock Document\nHello from raw content.\n",
+        },
+        "dox-root-a": {
+            "title": "Mock Root Doc A",
+            "revision_id": 3,
+            "children": [
+                "blk-root-a-heading",
+                "blk-root-a-paragraph",
+                "blk-root-a-bullet",
+                "blk-root-a-ordered",
+                "blk-root-a-quote",
+                "blk-root-a-code",
+            ],
+            "url": "https://example.test/docx/dox-root-a",
+            "raw_content": "Mock Root Doc A\nRoot A content.\n",
+            "blocks": [
+                {
+                    "block_id": "dox-root-a",
+                    "block_type": 1,
+                    "children": [
+                        "blk-root-a-heading",
+                        "blk-root-a-paragraph",
+                        "blk-root-a-bullet",
+                        "blk-root-a-ordered",
+                        "blk-root-a-quote",
+                        "blk-root-a-code",
+                    ],
+                    "page": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Mock Root Doc A",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-heading",
+                    "block_type": 4,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "heading2": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Architecture",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-paragraph",
+                    "block_type": 2,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "text": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "High fidelity ",
+                                    "text_element_style": {},
+                                }
+                            },
+                            {
+                                "text_run": {
+                                    "content": "paragraph",
+                                    "text_element_style": {"bold": True},
+                                }
+                            },
+                            {
+                                "text_run": {
+                                    "content": " from blocks.",
+                                    "text_element_style": {},
+                                }
+                            },
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-bullet",
+                    "block_type": 12,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "bullet": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "First bullet",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-ordered",
+                    "block_type": 13,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "ordered": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "First ordered step",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-quote",
+                    "block_type": 14,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "quote": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Important note from the block tree.",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-code",
+                    "block_type": 15,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "code": {
+                        "language": "bash",
+                        "content": "echo \"smoke\"\npython -m py_compile",
+                    },
+                },
+            ],
+        },
+        "dox-root-b": {
+            "title": "Mock Root Doc B",
+            "revision_id": 4,
+            "children": [],
+            "url": "https://example.test/docx/dox-root-b",
+            "raw_content": "Mock Root Doc B\nRoot B content.\n",
+        },
+        "dox-team-note": {
+            "title": "Team Note",
+            "revision_id": 2,
+            "children": [],
+            "url": "https://example.test/docx/dox-team-note",
+            "raw_content": "Team Note\nNested team note content.\n",
+        },
+        "dox-archive-note": {
+            "title": "Archive Note",
+            "revision_id": 1,
+            "children": [],
+            "url": "https://example.test/docx/dox-archive-note",
+            "raw_content": "Archive Note\nArchived nested content.\n",
         }
     }
+    drive_files = {
+        "fld-root-mock": [
+            {
+                "name": "Mock Root Doc A",
+                "type": "docx",
+                "token": "dox-root-a",
+                "parent_token": "fld-root-mock",
+                "url": "https://example.test/docx/dox-root-a",
+                "created_time": "1773500000",
+                "modified_time": "1773500001",
+            },
+            {
+                "name": "Mock Root Doc B",
+                "type": "docx",
+                "token": "dox-root-b",
+                "parent_token": "fld-root-mock",
+                "url": "https://example.test/docx/dox-root-b",
+                "created_time": "1773500002",
+                "modified_time": "1773500003",
+            },
+            {
+                "name": "Team Notes",
+                "type": "folder",
+                "token": "fld-team-notes",
+                "parent_token": "fld-root-mock",
+                "url": "https://example.test/folder/fld-team-notes",
+                "created_time": "1773500004",
+                "modified_time": "1773500005",
+            },
+        ],
+        "fld-team-notes": [
+            {
+                "name": "Team Note",
+                "type": "docx",
+                "token": "dox-team-note",
+                "parent_token": "fld-team-notes",
+                "url": "https://example.test/docx/dox-team-note",
+                "created_time": "1773500006",
+                "modified_time": "1773500007",
+            },
+            {
+                "name": "Archive",
+                "type": "folder",
+                "token": "fld-archive",
+                "parent_token": "fld-team-notes",
+                "url": "https://example.test/folder/fld-archive",
+                "created_time": "1773500008",
+                "modified_time": "1773500009",
+            },
+        ],
+        "fld-archive": [
+            {
+                "name": "Archive Note",
+                "type": "docx",
+                "token": "dox-archive-note",
+                "parent_token": "fld-archive",
+                "url": "https://example.test/docx/dox-archive-note",
+                "created_time": "1773500010",
+                "modified_time": "1773500011",
+            }
+        ],
+    }
     create_counter = 0
+    folder_counter = 0
+    media_counter = 0
+    media_uploads = []
+
+    @classmethod
+    def _ensure_folder_bucket(cls, folder_token: str) -> list[dict]:
+        return cls.drive_files.setdefault(folder_token, [])
+
+    @classmethod
+    def _register_drive_child(cls, parent_token: str, entry: dict) -> None:
+        bucket = cls._ensure_folder_bucket(parent_token)
+        token = str(entry.get("token") or "")
+        for index, existing in enumerate(bucket):
+            if str(existing.get("token") or "") == token:
+                bucket[index] = entry
+                return
+        bucket.append(entry)
+
+    @classmethod
+    def _remove_drive_child(cls, file_token: str) -> None:
+        for parent_token, bucket in cls.drive_files.items():
+            cls.drive_files[parent_token] = [
+                item for item in bucket if str(item.get("token") or "") != file_token
+            ]
 
     def log_message(self, format: str, *args: object) -> None:
         return
 
     def _read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length <= 0:
+        raw_bytes = self._read_raw_body()
+        if not raw_bytes:
             return {}
-        raw = self.rfile.read(length).decode("utf-8", "replace")
+        raw = raw_bytes.decode("utf-8", "replace")
         if not raw:
             return {}
         return json.loads(raw)
+
+    def _read_raw_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return b""
+        return self.rfile.read(length)
+
+    def _parse_multipart_form_data(self) -> tuple[dict[str, str], dict[str, dict[str, object]]]:
+        content_type = self.headers.get("Content-Type", "")
+        boundary_match = re.search(r'boundary="?([^";]+)"?', content_type)
+        if not boundary_match:
+            return {}, {}
+        boundary = boundary_match.group(1).encode("utf-8")
+        raw_body = self._read_raw_body()
+        fields: dict[str, str] = {}
+        files: dict[str, dict[str, object]] = {}
+        delimiter = b"--" + boundary
+        for part in raw_body.split(delimiter):
+            stripped = part.strip()
+            if not stripped or stripped == b"--":
+                continue
+            if stripped.endswith(b"--"):
+                stripped = stripped[:-2]
+            if stripped.startswith(b"\r\n"):
+                stripped = stripped[2:]
+            if b"\r\n\r\n" not in stripped:
+                continue
+            raw_headers, content = stripped.split(b"\r\n\r\n", 1)
+            content = content.rstrip(b"\r\n")
+            header_lines = raw_headers.decode("utf-8", "replace").split("\r\n")
+            disposition = next(
+                (line for line in header_lines if line.lower().startswith("content-disposition:")),
+                "",
+            )
+            name_match = re.search(r'name="([^"]+)"', disposition)
+            if not name_match:
+                continue
+            field_name = name_match.group(1)
+            filename_match = re.search(r'filename="([^"]*)"', disposition)
+            part_content_type = ""
+            for line in header_lines:
+                if line.lower().startswith("content-type:"):
+                    part_content_type = line.split(":", 1)[1].strip()
+                    break
+            if filename_match:
+                files[field_name] = {
+                    "filename": filename_match.group(1),
+                    "content_type": part_content_type,
+                    "content": content,
+                    "size": len(content),
+                }
+                continue
+            fields[field_name] = content.decode("utf-8", "replace")
+        return fields, files
 
     def _write_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -113,12 +421,27 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
             MockFeishuHandler.create_counter += 1
             document_id = f"dox-created-{MockFeishuHandler.create_counter}"
             title = payload.get("title") or f"Created Mock Document {MockFeishuHandler.create_counter}"
+            folder_token = str(payload.get("folder_token") or "")
             MockFeishuHandler.documents[document_id] = {
                 "title": title,
                 "revision_id": 1,
                 "children": [],
                 "url": f"https://example.test/docx/{document_id}",
+                "raw_content": f"{title}\n",
             }
+            if folder_token:
+                MockFeishuHandler._register_drive_child(
+                    folder_token,
+                    {
+                        "name": title,
+                        "type": "docx",
+                        "token": document_id,
+                        "parent_token": folder_token,
+                        "url": f"https://example.test/docx/{document_id}",
+                        "created_time": "1773500100",
+                        "modified_time": "1773500101",
+                    },
+                )
             self._write_json(
                 200,
                 {
@@ -131,6 +454,75 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
                             "revision_id": 1,
                             "url": f"https://example.test/docx/{document_id}",
                         }
+                    },
+                },
+            )
+            return
+
+        if parsed.path == "/open-apis/drive/v1/files/create_folder":
+            payload = self._read_json_body()
+            parent_token = str(payload.get("folder_token") or "")
+            name = str(payload.get("name") or "").strip() or "New Folder"
+            MockFeishuHandler.folder_counter += 1
+            folder_token = f"fld-created-{MockFeishuHandler.folder_counter}"
+            folder_url = f"https://example.test/folder/{folder_token}"
+            MockFeishuHandler._ensure_folder_bucket(folder_token)
+            if parent_token:
+                MockFeishuHandler._register_drive_child(
+                    parent_token,
+                    {
+                        "name": name,
+                        "type": "folder",
+                        "token": folder_token,
+                        "parent_token": parent_token,
+                        "url": folder_url,
+                        "created_time": "1773500102",
+                        "modified_time": "1773500103",
+                    },
+                )
+            self._write_json(
+                200,
+                {
+                    "code": 0,
+                    "msg": "ok",
+                    "data": {
+                        "folder": {
+                            "token": folder_token,
+                            "parent_token": parent_token,
+                            "name": name,
+                            "type": "folder",
+                            "url": folder_url,
+                        }
+                    },
+                },
+            )
+            return
+
+        if parsed.path == "/open-apis/drive/v1/medias/upload_all":
+            fields, files = self._parse_multipart_form_data()
+            MockFeishuHandler.media_counter += 1
+            file_token = f"box-mock-{MockFeishuHandler.media_counter}"
+            file_info = files.get("file", {})
+            MockFeishuHandler.media_uploads.append(
+                {
+                    "file_token": file_token,
+                    "document_id": fields.get("parent_node"),
+                    "parent_type": fields.get("parent_type"),
+                    "file_name": fields.get("file_name"),
+                    "size": fields.get("size"),
+                    "checksum": fields.get("checksum"),
+                    "extra": fields.get("extra"),
+                    "content_type": file_info.get("content_type"),
+                    "uploaded_size": file_info.get("size"),
+                }
+            )
+            self._write_json(
+                200,
+                {
+                    "code": 0,
+                    "msg": "ok",
+                    "data": {
+                        "file_token": file_token,
                     },
                 },
             )
@@ -265,17 +657,16 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/open-apis/docx/v1/documents/") and parsed.path.endswith("/raw_content"):
             document_id = parsed.path.strip("/").split("/")[4]
-            if document_id in MockFeishuHandler.documents:
-                title = MockFeishuHandler.documents[document_id]["title"]
-            else:
-                title = "Mock Document"
+            document = MockFeishuHandler.documents.get(document_id, {})
+            title = document.get("title", "Mock Document")
+            raw_content = document.get("raw_content", f"{title}\nHello from raw content.\n")
             self._write_json(
                 200,
                 {
                     "code": 0,
                     "msg": "ok",
                     "data": {
-                        "content": f"{title}\nHello from raw content.\n",
+                        "content": raw_content,
                     },
                 },
             )
@@ -287,19 +678,22 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
             if document is None:
                 self._write_json(404, {"code": 404, "msg": "not found"})
                 return
+            block_items = document.get("blocks")
+            if not isinstance(block_items, list):
+                block_items = [
+                    {
+                        "block_id": document_id,
+                        "block_type": 1,
+                        "children": list(document.get("children", [])),
+                    }
+                ]
             self._write_json(
                 200,
                 {
                     "code": 0,
                     "msg": "ok",
                     "data": {
-                        "items": [
-                            {
-                                "block_id": document_id,
-                                "block_type": 1,
-                                "children": list(document.get("children", [])),
-                            }
-                        ],
+                        "items": block_items,
                         "has_more": False,
                         "page_token": "",
                     },
@@ -347,7 +741,7 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
         if parsed.path == "/open-apis/drive/v1/files":
             query = parse_qs(parsed.query)
             folder_token = (query.get("folder_token") or [""])[0]
-            if folder_token == "fld-root-mock":
+            if folder_token in MockFeishuHandler.drive_files:
                 self._write_json(
                     200,
                     {
@@ -356,26 +750,7 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
                         "data": {
                             "has_more": False,
                             "next_page_token": None,
-                            "files": [
-                                {
-                                    "name": "Mock Root Doc A",
-                                    "type": "docx",
-                                    "token": "dox-root-a",
-                                    "parent_token": "fld-root-mock",
-                                    "url": "https://example.test/docx/dox-root-a",
-                                    "created_time": "1773500000",
-                                    "modified_time": "1773500001",
-                                },
-                                {
-                                    "name": "Mock Root Doc B",
-                                    "type": "docx",
-                                    "token": "dox-root-b",
-                                    "parent_token": "fld-root-mock",
-                                    "url": "https://example.test/docx/dox-root-b",
-                                    "created_time": "1773500002",
-                                    "modified_time": "1773500003",
-                                },
-                            ],
+                            "files": MockFeishuHandler.drive_files[folder_token],
                         },
                     },
                 )
@@ -426,6 +801,7 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/open-apis/drive/v1/files/") and (query.get("type") or [""])[0] == "docx":
             file_token = parsed.path.rsplit("/", 1)[-1]
             MockFeishuHandler.documents.pop(file_token, None)
+            MockFeishuHandler._remove_drive_child(file_token)
             self._write_json(200, {"code": 0, "msg": "ok", "data": {}})
             return
 
@@ -644,6 +1020,8 @@ def main() -> int:
                 raise RuntimeError(f"Unexpected push-markdown index payload: {push_file_index_payload}")
             if not push_file_index_payload["files"][0].get("doc_token"):
                 raise RuntimeError(f"push-markdown index entry is missing doc_token: {push_file_index_payload}")
+            if not push_file_index_payload["files"][0].get("body_hash") or not push_file_index_payload["files"][0].get("remote_revision_id"):
+                raise RuntimeError(f"push-markdown index entry is missing sync baseline fields: {push_file_index_payload}")
 
             push_dir_root = Path(tmp_dir) / "push-dir"
             push_dir_root.mkdir(parents=True, exist_ok=True)
@@ -682,6 +1060,54 @@ def main() -> int:
             push_dir_index_payload = json.loads(push_dir_index.read_text(encoding="utf-8"))
             if len(push_dir_index_payload.get("files", [])) != 2:
                 raise RuntimeError(f"Unexpected push-dir index payload: {push_dir_index_payload}")
+
+            mirror_push_dir_root = Path(tmp_dir) / "push-dir-mirror"
+            (mirror_push_dir_root / "Guides" / "API").mkdir(parents=True, exist_ok=True)
+            (mirror_push_dir_root / "Guides" / "API" / "intro.md").write_text(
+                "---\n"
+                "title: Intro Guide\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# Intro Guide\n\nMirror this nested file.\n",
+                encoding="utf-8",
+            )
+            mirror_push_dir_result = json.loads(
+                run_cli(
+                    "push-dir",
+                    str(mirror_push_dir_root),
+                    "--folder-token",
+                    "fld-root-mock",
+                    "--mirror-remote-folders",
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                )
+            )
+            if not mirror_push_dir_result.get("ok"):
+                raise RuntimeError(f"Unexpected mirrored push-dir result: {mirror_push_dir_result}")
+            mirror_result_payload = mirror_push_dir_result.get("result", {})
+            if mirror_result_payload.get("pushed_count") != 1:
+                raise RuntimeError(f"Unexpected mirrored push-dir pushed_count: {mirror_push_dir_result}")
+            mirrored_file_result = mirror_result_payload.get("results", [{}])[0]
+            folder_resolution = mirrored_file_result.get("folder_resolution", {})
+            if len(folder_resolution.get("created", [])) != 2:
+                raise RuntimeError(f"Expected two created remote folders for mirrored push-dir: {mirror_push_dir_result}")
+            mirror_push_index = mirror_push_dir_root / "feishu-index.json"
+            mirror_push_index_payload = json.loads(mirror_push_index.read_text(encoding="utf-8"))
+            mirrored_entry = next(
+                (
+                    entry
+                    for entry in mirror_push_index_payload.get("files", [])
+                    if entry.get("relative_path") == "Guides/API/intro.md"
+                ),
+                None,
+            )
+            if not mirrored_entry or not str(mirrored_entry.get("folder_token") or "").startswith("fld-created-"):
+                raise RuntimeError(f"Mirrored push-dir did not persist the derived folder token: {mirror_push_index_payload}")
 
             get_result = json.loads(
                 run_cli(
@@ -727,8 +1153,401 @@ def main() -> int:
                     base_url,
                 )
             )
-            if not root_list_result.get("ok") or root_list_result.get("result", {}).get("file_count") != 2:
+            if not root_list_result.get("ok") or root_list_result.get("result", {}).get("file_count") != 4:
                 raise RuntimeError(f"Unexpected list-root-files result: {root_list_result}")
+
+            folder_list_result = json.loads(
+                run_cli(
+                    "list-folder-files",
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--recursive",
+                )
+            )
+            if not folder_list_result.get("ok"):
+                raise RuntimeError(f"Unexpected list-folder-files result: {folder_list_result}")
+            folder_listing = folder_list_result.get("result", {})
+            if folder_listing.get("file_count") != 5 or folder_listing.get("folder_count") != 4:
+                raise RuntimeError(f"Unexpected recursive folder listing summary: {folder_list_result}")
+
+            pull_root = Path(tmp_dir) / "pull-root"
+            pull_markdown_result = json.loads(
+                run_cli(
+                    "pull-markdown",
+                    "dox-root-a",
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--root",
+                    str(pull_root),
+                    "--relative-path",
+                    "imports/root-a.md",
+                )
+            )
+            if not pull_markdown_result.get("ok"):
+                raise RuntimeError(f"Unexpected pull-markdown result: {pull_markdown_result}")
+            pulled_file = pull_root / "imports" / "root-a.md"
+            if not pulled_file.is_file():
+                raise RuntimeError("pull-markdown did not create the expected local Markdown file")
+            pulled_text = pulled_file.read_text(encoding="utf-8")
+            if "feishu_doc_token: dox-root-a" not in pulled_text or "Root A content." not in pulled_text:
+                raise RuntimeError(f"Unexpected pull-markdown file content: {pulled_text}")
+            pull_index = pull_root / "feishu-index.json"
+            pull_index_payload = json.loads(pull_index.read_text(encoding="utf-8"))
+            if pull_index_payload.get("files", [{}])[0].get("doc_token") != "dox-root-a":
+                raise RuntimeError(f"Unexpected pull-markdown index payload: {pull_index_payload}")
+            if pull_index_payload.get("files", [{}])[0].get("last_pull_fidelity") != "raw_content":
+                raise RuntimeError(f"pull-markdown did not persist pull fidelity into the index: {pull_index_payload}")
+            if pull_index_payload.get("files", [{}])[0].get("remote_revision_id") != 3:
+                raise RuntimeError(f"pull-markdown did not persist the remote revision baseline: {pull_index_payload}")
+
+            pull_markdown_high_root = Path(tmp_dir) / "pull-root-high"
+            pull_markdown_high_result = json.loads(
+                run_cli(
+                    "pull-markdown",
+                    "dox-root-a",
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--root",
+                    str(pull_markdown_high_root),
+                    "--relative-path",
+                    "imports/high-root-a.md",
+                    "--fidelity",
+                    "high",
+                )
+            )
+            if not pull_markdown_high_result.get("ok"):
+                raise RuntimeError(f"Unexpected high-fidelity pull-markdown result: {pull_markdown_high_result}")
+            high_pull_payload = pull_markdown_high_result.get("result", {})
+            if high_pull_payload.get("fidelity") != "high":
+                raise RuntimeError(f"pull-markdown did not report high fidelity: {pull_markdown_high_result}")
+            high_pulled_file = pull_markdown_high_root / "imports" / "high-root-a.md"
+            high_pulled_text = high_pulled_file.read_text(encoding="utf-8")
+            for expected_fragment in (
+                "feishu_pull_fidelity: blocks",
+                "## Architecture",
+                "High fidelity **paragraph** from blocks.",
+                "- First bullet",
+                "1. First ordered step",
+                "> Important note from the block tree.",
+                "```bash",
+                "echo \"smoke\"",
+            ):
+                if expected_fragment not in high_pulled_text:
+                    raise RuntimeError(f"High-fidelity pull-markdown missed expected content {expected_fragment!r}: {high_pulled_text}")
+            high_pull_index_payload = json.loads((pull_markdown_high_root / "feishu-index.json").read_text(encoding="utf-8"))
+            if high_pull_index_payload.get("files", [{}])[0].get("last_pull_fidelity") != "blocks":
+                raise RuntimeError(f"High-fidelity pull-markdown did not persist block fidelity into the index: {high_pull_index_payload}")
+
+            pull_dir_root = Path(tmp_dir) / "pull-dir-root"
+            pull_dir_result = json.loads(
+                run_cli(
+                    "pull-dir",
+                    str(pull_dir_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                )
+            )
+            if not pull_dir_result.get("ok"):
+                raise RuntimeError(f"Unexpected pull-dir result: {pull_dir_result}")
+            if pull_dir_result.get("result", {}).get("pulled_count") != 5:
+                raise RuntimeError(f"Unexpected pull-dir pulled_count: {pull_dir_result}")
+            pull_dir_index = pull_dir_root / "feishu-index.json"
+            pull_dir_index_payload = json.loads(pull_dir_index.read_text(encoding="utf-8"))
+            if len(pull_dir_index_payload.get("files", [])) != 5:
+                raise RuntimeError(f"Unexpected pull-dir index payload: {pull_dir_index_payload}")
+            nested_pull_file = pull_dir_root / "Team-Notes" / "Archive" / "Archive-Note.md"
+            if not nested_pull_file.is_file():
+                raise RuntimeError("pull-dir did not create the expected nested Markdown file")
+            mirrored_pull_file = pull_dir_root / "Guides" / "API" / "Intro-Guide.md"
+            if not mirrored_pull_file.is_file():
+                raise RuntimeError("pull-dir did not create the expected mirrored nested Markdown file")
+
+            pull_dir_high_root = Path(tmp_dir) / "pull-dir-root-high"
+            pull_dir_high_result = json.loads(
+                run_cli(
+                    "pull-dir",
+                    str(pull_dir_high_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--fidelity",
+                    "high",
+                )
+            )
+            if not pull_dir_high_result.get("ok"):
+                raise RuntimeError(f"Unexpected high-fidelity pull-dir result: {pull_dir_high_result}")
+            pull_dir_high_payload = pull_dir_high_result.get("result", {})
+            if pull_dir_high_payload.get("fidelity") != "high" or pull_dir_high_payload.get("pulled_count") != 5:
+                raise RuntimeError(f"Unexpected high-fidelity pull-dir payload: {pull_dir_high_result}")
+            high_dir_file = pull_dir_high_root / "Mock-Root-Doc-A.md"
+            if "feishu_pull_fidelity: blocks" not in high_dir_file.read_text(encoding="utf-8"):
+                raise RuntimeError("pull-dir --fidelity high did not persist block-export front matter")
+
+            media_file = Path(tmp_dir) / "diagram.png"
+            media_file.write_bytes(b"\x89PNG\r\n\x1a\nmock-image-data")
+            upload_media_result = json.loads(
+                run_cli(
+                    "upload-media",
+                    "dox-mock",
+                    str(media_file),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--file-name",
+                    "architecture.png",
+                    "--extra-drive-route-token",
+                    "fld-root-mock",
+                )
+            )
+            if not upload_media_result.get("ok"):
+                raise RuntimeError(f"Unexpected upload-media result: {upload_media_result}")
+            upload_payload = upload_media_result.get("result", {})
+            if not str(upload_payload.get("file_token") or "").startswith("box-mock-"):
+                raise RuntimeError(f"upload-media did not return a mock file token: {upload_media_result}")
+            last_upload = MockFeishuHandler.media_uploads[-1] if MockFeishuHandler.media_uploads else {}
+            if last_upload.get("document_id") != "dox-mock" or last_upload.get("parent_type") != "docx_image":
+                raise RuntimeError(f"upload-media did not preserve document routing fields: {last_upload}")
+            if last_upload.get("file_name") != "architecture.png" or last_upload.get("size") != str(media_file.stat().st_size):
+                raise RuntimeError(f"upload-media did not preserve file metadata: {last_upload}")
+
+            sync_root = Path(tmp_dir) / "sync-root"
+            sync_root.mkdir(parents=True, exist_ok=True)
+            (sync_root / "mapped.md").write_text(
+                "---\n"
+                "title: Mapped Root A\n"
+                "feishu_doc_token: dox-root-a\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# Mapped Root A\n"
+                "\n"
+                "Keep this file locally.\n",
+                encoding="utf-8",
+            )
+            (sync_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "missing.md",
+                                "doc_token": "dox-root-b",
+                                "title": "Mock Root Doc B",
+                                "sync_direction": "push",
+                            }
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            sync_dir_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(sync_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--dry-run",
+                    "--prune",
+                )
+            )
+            if not sync_dir_result.get("ok"):
+                raise RuntimeError(f"Unexpected sync-dir result: {sync_dir_result}")
+            sync_summary = sync_dir_result.get("result", {}).get("summary", {})
+            if sync_summary.get("remote_pull_candidate_count") != 3:
+                raise RuntimeError(f"Unexpected sync-dir remote pull candidate count: {sync_dir_result}")
+            if sync_summary.get("prune_candidate_count") != 1:
+                raise RuntimeError(f"Unexpected sync-dir prune candidate count: {sync_dir_result}")
+            if sync_summary.get("local_action_counts", {}).get("update_doc") != 1:
+                raise RuntimeError(f"Unexpected sync-dir local action counts: {sync_dir_result}")
+
+            conflict_root = Path(tmp_dir) / "conflict-root"
+            conflict_root.mkdir(parents=True, exist_ok=True)
+            pull_remote_path = conflict_root / "pull-remote.md"
+            pull_remote_path.write_text(
+                "---\n"
+                "title: Pull Remote\n"
+                "feishu_doc_token: dox-root-a\n"
+                "feishu_sync_direction: pull\n"
+                "---\n"
+                "\n"
+                "# Pull Remote\n"
+                "\n"
+                "Keep remote as source.\n",
+                encoding="utf-8",
+            )
+            push_local_path = conflict_root / "push-local.md"
+            push_local_path.write_text(
+                "---\n"
+                "title: Push Local\n"
+                "feishu_doc_token: dox-team-note\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# Push Local\n"
+                "\n"
+                "Local draft changed.\n",
+                encoding="utf-8",
+            )
+            review_conflict_path = conflict_root / "review-conflict.md"
+            review_conflict_path.write_text(
+                "---\n"
+                "title: Review Conflict\n"
+                "feishu_doc_token: dox-archive-note\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Review Conflict\n"
+                "\n"
+                "Both sides changed.\n",
+                encoding="utf-8",
+            )
+            (conflict_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "pull-remote.md",
+                                "doc_token": "dox-root-a",
+                                "title": "Pull Remote",
+                                "sync_direction": "pull",
+                                "body_hash": sha256_text("\n# Pull Remote\n\nKeep remote as source."),
+                                "remote_revision_id": 2,
+                                "remote_content_hash": sha256_text("older remote snapshot"),
+                                "last_sync_at": "2026-03-14T12:00:00Z",
+                            },
+                            {
+                                "relative_path": "push-local.md",
+                                "doc_token": "dox-team-note",
+                                "title": "Push Local",
+                                "sync_direction": "push",
+                                "body_hash": sha256_text("\n# Push Local\n\nPrevious local draft."),
+                                "remote_revision_id": 2,
+                                "remote_content_hash": sha256_text(str(MockFeishuHandler.documents["dox-team-note"]["raw_content"])),
+                                "last_sync_at": "2026-03-14T12:05:00Z",
+                            },
+                            {
+                                "relative_path": "review-conflict.md",
+                                "doc_token": "dox-archive-note",
+                                "title": "Review Conflict",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# Review Conflict\n\nPrevious local text."),
+                                "remote_revision_id": 0,
+                                "remote_content_hash": sha256_text("much older remote snapshot"),
+                                "last_sync_at": "2026-03-14T12:10:00Z",
+                            },
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            conflict_detect_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(conflict_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--dry-run",
+                    "--detect-conflicts",
+                )
+            )
+            if not conflict_detect_result.get("ok"):
+                raise RuntimeError(f"Unexpected sync-dir conflict detection result: {conflict_detect_result}")
+            conflict_detection = conflict_detect_result.get("result", {}).get("conflict_detection", {})
+            if conflict_detection.get("inspected_count") != 3:
+                raise RuntimeError(f"Unexpected inspected_count for sync-dir conflict detection: {conflict_detect_result}")
+            state_counts = conflict_detection.get("state_counts", {})
+            if state_counts.get("remote_ahead") != 1 or state_counts.get("local_ahead") != 1 or state_counts.get("local_and_remote_changed") != 1:
+                raise RuntimeError(f"Unexpected state counts for sync-dir conflict detection: {conflict_detect_result}")
+            action_counts = conflict_detection.get("recommended_action_counts", {})
+            if action_counts.get("pull_candidate") != 1 or action_counts.get("push_candidate") != 1 or action_counts.get("manual_conflict_review") != 1:
+                raise RuntimeError(f"Unexpected recommended actions for sync-dir conflict detection: {conflict_detect_result}")
+            conflict_summary = conflict_detect_result.get("result", {}).get("summary", {})
+            if conflict_summary.get("conflict_review_count") != 1:
+                raise RuntimeError(f"Unexpected sync-dir conflict review count: {conflict_detect_result}")
+            conflict_results = {
+                entry.get("relative_path"): entry
+                for entry in conflict_detection.get("results", [])
+                if isinstance(entry, dict)
+            }
+            if conflict_results.get("pull-remote.md", {}).get("comparison", {}).get("recommended_action") != "pull_candidate":
+                raise RuntimeError(f"pull-remote.md did not classify as a pull candidate: {conflict_detect_result}")
+            if conflict_results.get("push-local.md", {}).get("comparison", {}).get("recommended_action") != "push_candidate":
+                raise RuntimeError(f"push-local.md did not classify as a push candidate: {conflict_detect_result}")
+            if conflict_results.get("review-conflict.md", {}).get("comparison", {}).get("recommended_action") != "manual_conflict_review":
+                raise RuntimeError(f"review-conflict.md did not classify as a manual conflict review case: {conflict_detect_result}")
+
+            sync_dir_execute_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(sync_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--prune",
+                    "--confirm-prune",
+                )
+            )
+            if not sync_dir_execute_result.get("ok"):
+                raise RuntimeError(f"Unexpected sync-dir prune execution result: {sync_dir_execute_result}")
+            sync_execute_payload = sync_dir_execute_result.get("result", {})
+            sync_execute_summary = sync_execute_payload.get("summary", {})
+            if sync_execute_summary.get("pruned_count") != 1:
+                raise RuntimeError(f"Unexpected sync-dir pruned_count: {sync_dir_execute_result}")
+            if sync_execute_summary.get("index_removed_count") != 1:
+                raise RuntimeError(f"Unexpected sync-dir index_removed_count: {sync_dir_execute_result}")
+            backup_run_dir = Path(sync_execute_payload.get("backup", {}).get("run_dir", ""))
+            if not backup_run_dir.is_dir():
+                raise RuntimeError(f"sync-dir prune execution did not create a backup directory: {sync_dir_execute_result}")
+            if not (backup_run_dir / "sync-dir-plan.json").is_file():
+                raise RuntimeError(f"sync-dir prune execution did not write the plan snapshot: {sync_dir_execute_result}")
+            if not (backup_run_dir / "index" / "feishu-index.json").is_file():
+                raise RuntimeError(f"sync-dir prune execution did not write the index snapshot: {sync_dir_execute_result}")
+            backup_doc_md = backup_run_dir / "remote-docs" / "missing.md-root-b" / "document.md"
+            if not backup_doc_md.is_file():
+                raise RuntimeError(f"sync-dir prune execution did not back up the remote doc: {sync_dir_execute_result}")
+            sync_root_index_payload = json.loads((sync_root / "feishu-index.json").read_text(encoding="utf-8"))
+            if sync_root_index_payload.get("files") != []:
+                raise RuntimeError(f"sync-dir prune execution did not clear the missing index entry: {sync_root_index_payload}")
+            if "dox-root-b" in MockFeishuHandler.documents:
+                raise RuntimeError("sync-dir prune execution did not delete the remote document")
 
             delete_result = json.loads(
                 run_cli(

@@ -5,6 +5,9 @@
 - The bundled CLI now supports both planning and a first live tenant-mode execution path.
 - `plan-push`, `plan-pull`, and `plan-dir` still describe intended actions before execution.
 - `push-markdown`, `replace-markdown`, and `push-dir` perform real Feishu API calls and can modify remote docs immediately.
+- `pull-markdown` and `pull-dir` perform real Feishu API calls and write local Markdown files immediately.
+- `sync-dir --dry-run` is still the planning surface for mixed sync work.
+- `sync-dir --prune --confirm-prune` now performs a guarded prune path with local backups and index cleanup.
 
 ## Mapping Sources
 
@@ -81,6 +84,22 @@ For directory plans:
 - It keeps paths relative to the chosen sync root.
 - It does not try to infer remote deletes or remote renames yet.
 
+For `sync-dir --dry-run`:
+
+- The command combines local Markdown plans with an app-visible remote folder listing.
+- It surfaces remote pull candidates for visible `docx` files that are not already mapped locally.
+- With `--prune`, it also surfaces prune candidates when an index-mapped remote doc still exists but the local Markdown file is gone.
+- It does not execute writes or deletes yet.
+
+For `sync-dir --prune --confirm-prune`:
+
+- The command rebuilds the same prune candidate set as the dry-run plan.
+- It creates a timestamped backup run under `<sync-root>/.feishu-sync-backups` unless `--backup-dir` overrides that location.
+- It snapshots the current sync plan and `feishu-index.json` before any remote delete is attempted.
+- It exports each prune target to a low-fidelity local backup from `raw_content` before deleting the remote doc.
+- It removes only successfully deleted entries from `feishu-index.json`.
+- It still does not execute mixed push or pull actions for the remaining plan items.
+
 ## Live Push Rules
 
 For `push-markdown`:
@@ -104,6 +123,38 @@ For `push-dir`:
 - It writes or updates `feishu-index.json` incrementally as each file succeeds.
 - It skips pull-only files unless `--ignore-sync-direction` is passed.
 - It stops on the first failure unless `--continue-on-error` is passed.
+- With `--mirror-remote-folders`, files that would otherwise create docs in the root folder derive a remote folder path from the local relative directory.
+- With `--mirror-remote-folders --folder-token <fld>`, the supplied folder token is treated as the mirror root, not as a hard per-file override.
+- Explicit `feishu_folder_token` or index `folder_token` mappings still win over derived folder paths for that file.
+- If `feishu-index.json` maps the same local directory to conflicting folder tokens, `push-dir --mirror-remote-folders` fails before any remote writes.
+
+## Live Pull Rules
+
+For `pull-markdown`:
+
+- The current implementation always fetches document metadata plus `raw_content`.
+- With `--fidelity low`, it writes a low-fidelity local Markdown file based on `raw_content`.
+- With `--fidelity high`, it also lists the document block tree and rebuilds Markdown for common block types.
+- Existing local files require `--overwrite`.
+- `--root` and `--index-path` enable `feishu-index.json` write-back automatically.
+
+For `pull-dir`:
+
+- The command walks the visible folder tree and exports every visible `docx` file.
+- `--fidelity low` uses `raw_content`; `--fidelity high` reuses the block-tree exporter for each file in the run.
+- Existing index mappings win over derived remote paths when deciding where to write local files.
+- Otherwise local paths are derived from remote folder names and document titles.
+- It writes or updates `feishu-index.json` incrementally as each export succeeds.
+- It stops on the first failure unless `--continue-on-error` is passed.
+
+For `sync-dir --dry-run --detect-conflicts`:
+
+- The command reuses the same folder visibility scan as normal dry-run.
+- It fetches current remote metadata and `raw_content` for mapped visible docs only.
+- It compares the current local body hash to the last synced `body_hash`.
+- It compares the current remote revision or `raw_content` hash to the last synced remote baseline.
+- It emits review-oriented classifications such as `local_ahead`, `remote_ahead`, `local_and_remote_changed`, and `baseline_incomplete`.
+- It does not execute push, pull, or prune actions on the strength of those classifications.
 
 ## Title Resolution
 
@@ -126,20 +177,34 @@ Single-file live push:
 - `python scripts/feishu_doc_sync.py push-markdown path/to/file.md`
 - `python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --markdown-file path/to/file.md --confirm-replace`
 
+Single-file live pull:
+
+- `python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --root path/to/exports`
+- `python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --root path/to/exports --fidelity high`
+- `python scripts/feishu_doc_sync.py upload-media doxxxxxxxxxxxxxxxxxxxxxxxxx path/to/image.png --parent-type docx_image`
+
 Directory planning:
 
 - `python scripts/feishu_doc_sync.py plan-dir path/to/dir`
 - `python scripts/feishu_doc_sync.py plan-dir path/to/dir --mode pull`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --prune`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --detect-conflicts`
 
-Directory live push:
+Directory live execution:
 
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir`
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir --confirm-replace`
+- `python scripts/feishu_doc_sync.py push-dir path/to/dir --folder-token fldxxxxxxxxxxxxxxxxxxxxxxxxx --mirror-remote-folders`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --prune --confirm-prune`
+- `python scripts/feishu_doc_sync.py pull-dir path/to/exports`
+- `python scripts/feishu_doc_sync.py pull-dir path/to/exports --fidelity high`
 
 ## Safe Extension Order
 
 1. Keep front matter and index semantics stable.
 2. Keep tenant-mode create, replace, and index write-back stable.
-3. Add media upload and richer Markdown block coverage.
-4. Add remote pull/export and higher-fidelity Markdown regeneration.
-5. Add conflict detection, diffing, and bidirectional merge last.
+3. Harden prune execution with richer restore tooling and clearer operator review output.
+4. Expand media-aware push flows and richer Markdown block coverage.
+5. Improve remote pull/export fidelity coverage and restore tooling.
+6. Keep conflict detection review-first; add richer diffing and bidirectional execution only after the planning signals stay stable.

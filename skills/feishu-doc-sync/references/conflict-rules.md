@@ -23,6 +23,7 @@ When you extend the scaffold, compare at least:
 
 - local content hash
 - last known remote revision ID
+- last known remote content hash when a revision baseline is missing
 - last sync timestamp
 - current mode (`push` or `pull`)
 
@@ -30,8 +31,34 @@ When you extend the scaffold, compare at least:
 
 - It computes local hashes.
 - It surfaces whether a local file already has a mapped doc token.
-- It does not fetch remote revision IDs yet.
+- It writes `body_hash`, `remote_revision_id`, and `remote_content_hash` back into `feishu-index.json` as sync baselines.
+- `sync-dir --dry-run --detect-conflicts` fetches current remote metadata and `raw_content` for mapped visible docs.
+- It classifies `local_ahead`, `remote_ahead`, `local_and_remote_changed`, and `baseline_incomplete` states.
 - It does not attempt delete propagation.
+
+## Current Dry-Run Conflict Detection
+
+Use:
+
+```bash
+python scripts/feishu_doc_sync.py sync-dir .\docs --dry-run --detect-conflicts
+```
+
+Current comparison model:
+
+- compare the current local Markdown body hash to the last synced `body_hash`
+- compare the current remote revision or `raw_content` hash to the last synced remote baseline
+- map the result through the file's current `sync_direction`
+
+Current recommended actions:
+
+- `push_candidate`: only the local file changed since the last baseline
+- `pull_candidate`: only the remote doc changed since the last baseline
+- `review_before_push` or `review_before_pull`: the requested direction would overwrite newer changes on the other side
+- `manual_conflict_review`: both sides changed
+- `rebuild_sync_baseline`: the index is missing enough state to trust conflict detection yet
+
+Treat this as a planning and review surface, not an execution engine. It does not write local files or remote docs.
 
 ## Safe Resolution Patterns
 

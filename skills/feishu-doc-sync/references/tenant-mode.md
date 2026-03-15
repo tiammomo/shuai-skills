@@ -32,6 +32,11 @@ This repo already has live, real-API capability for tenant mode:
 - `create-document`
 - `get-document`
 - `get-raw-content`
+- `list-folder-files`
+- `pull-markdown`
+- `pull-dir`
+- `sync-dir --dry-run`
+- `sync-dir --prune --confirm-prune`
 - `append-markdown`
 - `replace-markdown`
 - `push-markdown`
@@ -49,10 +54,16 @@ With the current tenant-mode CLI, you can already:
 - create a real cloud document
 - fetch document metadata
 - fetch the document's plain-text content
+- enumerate a specific app-visible folder recursively
+- export one app-visible document into low-fidelity local Markdown
+- export an app-visible folder tree into low-fidelity local Markdown
+- build a dry-run tenant sync plan that surfaces pull candidates, prune candidates, and risk items
+- execute guarded prune deletes for index-mapped remote docs that no longer have local Markdown files
 - convert local Markdown into Feishu docx blocks and append it into a target document
 - replace one existing document body with local Markdown
 - push one local Markdown file and write back `feishu-index.json`
 - push a Markdown directory and write back `feishu-index.json`
+- mirror local subdirectories into remote Feishu folders when new docs are created during `push-dir`
 - strip YAML front matter from local Markdown files by default before conversion, including UTF-8 BOM files commonly produced on Windows
 - enumerate files visible under the app-visible root or a supplied folder token
 - delete app-visible test documents when cleanup is needed
@@ -65,11 +76,15 @@ This is enough for a solid tenant-mode verification loop and a first real Markdo
 2. Enable required docx and drive scopes for the app.
 3. Add the app to each target document when needed.
 4. Run `python scripts/feishu_doc_sync.py tenant-token` or `validate-tenant`.
-5. Use `list-root-files` and `get-document` to confirm the app can really see the targets.
-6. Use `get-raw-content` to verify the document body that tenant mode actually sees.
-7. Use `append-markdown`, `replace-markdown`, or `push-markdown` to push local Markdown into the target document.
-8. Use `push-dir` when you are ready to execute a directory-level tenant push with index write-back.
-9. Use `get-raw-content` again to verify the remote result.
+5. Use `list-root-files`, `list-folder-files`, and `get-document` to confirm the app can really see the targets.
+6. Use `get-raw-content` or `pull-markdown` to verify the document body that tenant mode actually sees.
+7. Use `pull-dir` when you need a low-fidelity local export of the visible remote tree.
+8. Use `sync-dir --dry-run` before mixing existing local mappings with remote visibility.
+9. Use `sync-dir --prune --confirm-prune` only after reviewing the plan and confirming the backup location.
+10. Use `append-markdown`, `replace-markdown`, or `push-markdown` to push local Markdown into the target document.
+11. Use `push-dir` when you are ready to execute a directory-level tenant push with index write-back.
+12. Add `--mirror-remote-folders` when new docs should land under remote folders derived from the local directory tree.
+13. Use `get-raw-content` again to verify the remote result.
 
 ## Verification Loop
 
@@ -77,15 +92,21 @@ When expanding tenant mode, use this progression:
 
 1. `tenant-token`
 2. `list-root-files`
-3. `get-document`
-4. `get-raw-content`
-5. `create-document`
-6. `append-markdown`
-7. `replace-markdown`
-8. `push-markdown`
-9. `push-dir`
-10. `get-raw-content`
-11. `delete-document`
+3. `list-folder-files`
+4. `get-document`
+5. `get-raw-content`
+6. `pull-markdown`
+7. `pull-dir`
+8. `sync-dir --dry-run`
+9. `sync-dir --prune --confirm-prune`
+10. `create-document`
+11. `append-markdown`
+12. `replace-markdown`
+13. `push-markdown`
+14. `push-dir`
+15. `push-dir --folder-token fldxxxxxxxxxxxxxxxxxxxxxxxxx --mirror-remote-folders`
+16. `get-raw-content`
+17. `delete-document`
 
 That sequence gives you a fast way to prove:
 
@@ -117,12 +138,22 @@ Tenant mode is the better default when:
 python scripts/feishu_doc_sync.py tenant-token
 python scripts/feishu_doc_sync.py validate-tenant
 python scripts/feishu_doc_sync.py list-root-files
+python scripts/feishu_doc_sync.py list-folder-files --recursive
 python scripts/feishu_doc_sync.py get-document doxxxxxxxxxxxxxxxxxxxxxxxxx
 python scripts/feishu_doc_sync.py get-raw-content doxxxxxxxxxxxxxxxxxxxxxxxxx
+python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --root .\\exports
+python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --root .\\exports --fidelity high
 python scripts/feishu_doc_sync.py append-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --markdown-file .\\notes.md
 python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --markdown-file .\\notes.md --confirm-replace
+python scripts/feishu_doc_sync.py upload-media doxxxxxxxxxxxxxxxxxxxxxxxxx .\\diagram.png --parent-type docx_image
 python scripts/feishu_doc_sync.py push-markdown path\\to\\file.md
 python scripts/feishu_doc_sync.py push-dir path\\to\\dir
+python scripts/feishu_doc_sync.py push-dir path\\to\\dir --folder-token fldxxxxxxxxxxxxxxxxxxxxxxxxx --mirror-remote-folders
+python scripts/feishu_doc_sync.py pull-dir path\\to\\exports
+python scripts/feishu_doc_sync.py pull-dir path\\to\\exports --fidelity high
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --dry-run
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --dry-run --detect-conflicts
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --prune --confirm-prune
 ```
 
 For cleanup or repeated probes:
@@ -138,10 +169,18 @@ Tenant mode is now strong enough for:
 
 - app-visible inventory checks
 - smoke tests for read and write access
+- app-visible low-fidelity document export via `raw_content`
+- app-visible higher-fidelity document export for common block types via `pull-markdown --fidelity high`
+- app-visible low-fidelity or higher-fidelity folder-tree export via `pull-dir`
+- dry-run planning for mixed local/remote tenant sync work
+- dry-run drift and conflict detection for mapped visible docs
+- guarded prune execution for index-mapped remote docs with local backups and index cleanup
+- explicit media upload into docx workflows with returned `file_token`
 - app-visible Markdown append into existing docs
 - app-visible document body replacement for existing docs
 - app-visible single-file push with automatic `feishu-index.json` write-back
 - app-visible directory push with automatic `feishu-index.json` write-back
+- app-visible directory push with optional remote folder mirroring for create flows
 - app-visible Markdown append from local files without leaking default YAML front matter into the remote doc body
 - verifying plain-text content after remote writes
 - cleaning up remote probe documents
@@ -149,9 +188,9 @@ Tenant mode is now strong enough for:
 Tenant mode in this repo still does not yet cover:
 
 - user-personal visibility
-- recursive document tree sync execution
-- rich block diffing or round-trip fidelity checks
-- media upload and richer embedded asset handling
+- mixed push and pull document-tree execution beyond guarded prune
+- rich block diffing, automatic conflict resolution, or round-trip fidelity guarantees
+- automatic embedded asset rewrite and richer media round-tripping
 
 ## Related Docs
 

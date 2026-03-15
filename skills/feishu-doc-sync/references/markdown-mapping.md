@@ -24,6 +24,11 @@ These parts are already covered by local smoke checks and tenant-mode live probe
 - destructive body replacement with `replace-markdown --confirm-replace`
 - single-file push with `push-markdown`
 - directory push with `push-dir`
+- single-file low-fidelity export with `pull-markdown --fidelity low`
+- single-file higher-fidelity export for common blocks with `pull-markdown --fidelity high`
+- directory low-fidelity export with `pull-dir --fidelity low`
+- directory higher-fidelity export for common blocks with `pull-dir --fidelity high`
+- explicit document media upload with `upload-media`
 - `feishu-index.json` write-back after a successful push
 
 Treat this list as the supported baseline for productionizing tenant-mode sync.
@@ -120,7 +125,12 @@ The upload API documentation also notes:
 - uploaded media is attached to the destination doc workflow, not shown as a normal Drive file
 - `docs:document.media:upload` is the narrow scope for doc-media upload
 
-This repository has not yet implemented a live media-upload path in `feishu_doc_sync.py`, so treat media mapping as planned work.
+This repository now implements an explicit live media-upload path in `feishu_doc_sync.py` through `upload-media`.
+
+Current boundary:
+
+- uploaded media can be pushed to a doc workflow and returns a `file_token`
+- automatic Markdown image or attachment rewrite during `push-markdown` / `push-dir` is not implemented yet
 
 ## Pull Strategy
 
@@ -129,7 +139,20 @@ Two pull strategies are worth separating:
 - `raw_content` for quick plain-text export
 - block-tree reconstruction for higher-fidelity Markdown regeneration
 
-Use `raw_content` only as a low-fidelity fallback. It is simpler, but it does not preserve all Markdown structure.
+Use `raw_content` as the low-fidelity fallback. It is simpler, but it does not preserve all Markdown structure.
+
+The current high-fidelity exporter is strongest for:
+
+- headings
+- paragraphs with common inline styles
+- bullet and ordered lists
+- quotes
+- code blocks
+- todo items
+- simple callouts
+- image and file placeholders that preserve Feishu tokens
+
+Treat tables, embeds, and other unsupported blocks as review-required output until the exporter coverage expands.
 
 ## Example Assets
 

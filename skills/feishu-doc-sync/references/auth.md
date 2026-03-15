@@ -42,7 +42,11 @@ Tenant auth and tenant-visible probes:
 - `python scripts/feishu_doc_sync.py get-document doxxxxxxxxxxxxxxxxxxxxxxxxx`
 - `python scripts/feishu_doc_sync.py get-raw-content doxxxxxxxxxxxxxxxxxxxxxxxxx`
 - `python scripts/feishu_doc_sync.py list-root-files`
+- `python scripts/feishu_doc_sync.py list-folder-files --recursive`
 - `python scripts/feishu_doc_sync.py delete-document doxxxxxxxxxxxxxxxxxxxxxxxxx`
+- `python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --root .\\exports`
+- `python scripts/feishu_doc_sync.py pull-dir .\\exports`
+- `python scripts/feishu_doc_sync.py sync-dir .\\docs --dry-run`
 
 Tenant write flows:
 
@@ -154,10 +158,13 @@ Practical consequences:
 2. Run `tenant-token`.
 3. Run `validate-tenant`.
 4. Create one disposable document with `create-document`.
-5. Read it with `get-document` and `get-raw-content`.
-6. Write into it with `append-markdown`.
-7. Confirm overwrite safeguards with `replace-markdown --confirm-replace`.
-8. Move to `push-markdown` and `push-dir` only after the single-document path is stable.
+5. Read it with `get-document`, `get-raw-content`, and `pull-markdown`.
+6. Explore app-visible inventory with `list-folder-files`.
+7. Export one folder tree with `pull-dir`.
+8. Run `sync-dir --dry-run` before any mixed local/remote workflow.
+9. Write into the document with `append-markdown`.
+10. Confirm overwrite safeguards with `replace-markdown --confirm-replace`.
+11. Move to `push-markdown` and `push-dir` only after the single-document path is stable.
 
 This keeps scope, visibility, Markdown conversion, and index write-back debugging separate enough to isolate failures.
 

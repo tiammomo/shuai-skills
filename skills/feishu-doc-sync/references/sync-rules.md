@@ -109,6 +109,8 @@ For `push-markdown`:
 - If no doc token exists, the command creates a new document, appends Markdown content, and writes the returned token back to `feishu-index.json`.
 - By default, YAML front matter is stripped before writing.
 - Files marked `pull` are skipped unless you pass `--ignore-sync-direction`.
+- `body_hash` and `baseline_body_snapshot` now track the Markdown body without front matter so later drift checks and semantic merge suggestions compare the same surface.
+- Because a push cannot trust the remote `raw_content` hash without a fresh pull, the stored `remote_content_hash` baseline is cleared on push and rebuilt on the next pull-based inspection.
 
 For `replace-markdown`:
 
@@ -154,7 +156,27 @@ For `sync-dir --dry-run --detect-conflicts`:
 - It compares the current local body hash to the last synced `body_hash`.
 - It compares the current remote revision or `raw_content` hash to the last synced remote baseline.
 - It emits review-oriented classifications such as `local_ahead`, `remote_ahead`, `local_and_remote_changed`, and `baseline_incomplete`.
+- With `--include-diff`, it also attaches a semantic block preview plus a truncated line diff per inspected mapped file.
+- `--diff-fidelity low` builds that preview from a `raw_content`-derived export.
+- `--diff-fidelity high` tries a block-tree export for common block types before falling back to `raw_content`.
+- `--diff-max-lines` limits the preview size per file so dry-run output remains readable.
+- `local_and_remote_changed` items also try to build a semantic merge suggestion from `baseline_body_snapshot`, the current local body, and a comparable remote export body.
+- The merge suggestion reports whether the local-only and remote-only semantic changes are non-overlapping enough for an opt-in auto-merge.
 - It does not execute push, pull, or prune actions on the strength of those classifications.
+
+For `sync-dir --execute-bidirectional --confirm-bidirectional`:
+
+- The command rebuilds a fresh dry-run conflict plan internally before any write.
+- It only acts on files whose current `sync_direction` is `bidirectional`.
+- `local_ahead` files are pushed with a remote backup taken first.
+- `remote_ahead` files are pulled with a local Markdown backup taken first.
+- With `--allow-auto-merge`, `local_and_remote_changed` files can become merge-and-push actions when the semantic merge suggestion says the block changes do not overlap.
+- With `--adopt-remote-new`, visible unmapped remote docs become bidirectional pull actions.
+- With `--include-create-flow`, unmapped local bidirectional files can create new remote docs and persist the returned mapping.
+- `in_sync` files are skipped without writes.
+- Any bidirectional file that is review-required, invisible, or missing a doc token blocks the whole run before execution begins.
+- `--pull-fidelity` controls the export mode used when a protected pull overwrites the local Markdown file.
+- Merge-push actions back up both the local Markdown file and the current remote doc, and restore the local file from backup if the follow-up push fails.
 
 ## Title Resolution
 
@@ -190,12 +212,17 @@ Directory planning:
 - `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run`
 - `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --prune`
 - `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --detect-conflicts`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --detect-conflicts --include-diff`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --dry-run --detect-conflicts --include-diff --diff-fidelity high --diff-max-lines 120`
 
 Directory live execution:
 
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir`
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir --confirm-replace`
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir --folder-token fldxxxxxxxxxxxxxxxxxxxxxxxxx --mirror-remote-folders`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --execute-bidirectional --confirm-bidirectional`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --execute-bidirectional --confirm-bidirectional --pull-fidelity high`
+- `python scripts/feishu_doc_sync.py sync-dir path/to/dir --execute-bidirectional --confirm-bidirectional --allow-auto-merge --adopt-remote-new --include-create-flow`
 - `python scripts/feishu_doc_sync.py sync-dir path/to/dir --prune --confirm-prune`
 - `python scripts/feishu_doc_sync.py pull-dir path/to/exports`
 - `python scripts/feishu_doc_sync.py pull-dir path/to/exports --fidelity high`
@@ -207,4 +234,4 @@ Directory live execution:
 3. Harden prune execution with richer restore tooling and clearer operator review output.
 4. Expand media-aware push flows and richer Markdown block coverage.
 5. Improve remote pull/export fidelity coverage and restore tooling.
-6. Keep conflict detection review-first; add richer diffing and bidirectional execution only after the planning signals stay stable.
+6. Keep conflict detection and bidirectional execution review-first; expand semantic merge coverage only after the planning signals stay stable.

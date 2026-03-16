@@ -87,6 +87,7 @@ Example:
 
 ```bash
 python scripts/feishu_doc_sync.py sync-dir .\docs --dry-run --prune
+python scripts/feishu_doc_sync.py sync-dir .\docs --dry-run --detect-conflicts --include-diff --diff-fidelity high
 ```
 
 Current dry-run output includes:
@@ -97,12 +98,49 @@ Current dry-run output includes:
 - prune candidates from missing local files that still have mapped remote docs
 - risk items such as invisible mapped docs and pull-only local files
 - optional conflict-detection results for mapped visible docs when `--detect-conflicts` is enabled
+- optional semantic block previews plus truncated line diffs for inspected mapped docs when `--include-diff` is enabled
+- semantic merge suggestions for `local_and_remote_changed` items when the index already stores a reusable baseline body snapshot
 
 Current safety boundary:
 
-- mixed push/pull execution is not implemented yet
+- protected bidirectional execution now supports clean bidirectional pairs by default, with opt-in merge, adopt, and create expansion modes
 - `--prune` only surfaces candidates, it does not delete anything
-- conflict detection is review-only; it does not auto-pull, auto-push, or auto-merge
+- conflict detection is still review-first; broad auto-pull, auto-push, and auto-merge are not the default
+- diff previews are body-oriented review aids, not semantic block merges or round-trip guarantees
+
+## `sync-dir --execute-bidirectional --confirm-bidirectional`
+
+Use `sync-dir --execute-bidirectional --confirm-bidirectional` when:
+
+- the local and remote document are already mapped through front matter or `feishu-index.json`
+- the file's `sync_direction` is `bidirectional`
+- the last sync baseline is complete enough for conflict detection
+- you want clean `local_ahead` items pushed and clean `remote_ahead` items pulled without hand-running each file
+
+Example:
+
+```bash
+python scripts/feishu_doc_sync.py sync-dir .\docs --execute-bidirectional --confirm-bidirectional
+python scripts/feishu_doc_sync.py sync-dir .\docs --execute-bidirectional --confirm-bidirectional --pull-fidelity high
+python scripts/feishu_doc_sync.py sync-dir .\docs --execute-bidirectional --confirm-bidirectional --allow-auto-merge --adopt-remote-new --include-create-flow
+```
+
+Current behavior:
+
+- rebuilds a fresh conflict plan before any execution
+- blocks the run when any bidirectional file still needs manual review
+- backs up the current remote doc before protected push
+- backs up the current local Markdown file before protected pull
+- can auto-merge and push a `local_and_remote_changed` file only when the semantic merge suggestion says the baseline, local, and remote changes do not overlap
+- can adopt visible unmapped remote docs into local Markdown plus `feishu-index.json` when `--adopt-remote-new` is enabled
+- can create new remote docs from unmapped local bidirectional files when `--include-create-flow` is enabled
+- updates `feishu-index.json` through the existing push and pull execution paths
+
+Current safety boundary:
+
+- it does not create new bidirectional mappings or adopt remote docs unless you opt into those execution modes
+- it does not auto-resolve overlapping conflicts
+- it does not semantically merge local and remote Markdown beyond the protected non-overlapping case
 
 ## `sync-dir --prune --confirm-prune`
 
@@ -160,12 +198,14 @@ Current safety boundary:
 2. `pull-markdown`
 3. `pull-dir`
 4. `sync-dir --dry-run`
-5. `sync-dir --prune --confirm-prune` when a reviewed prune plan should be executed
-6. `upload-media` when the job needs image or attachment tokens before richer push automation lands
+5. `sync-dir --execute-bidirectional --confirm-bidirectional` when the reviewed bidirectional plan is clean
+6. `sync-dir --prune --confirm-prune` when a reviewed prune plan should be executed
+7. `upload-media` when the job needs image or attachment tokens before richer push automation lands
 
 ## Next Planned Improvements
 
 - broader block-tree export coverage with fewer unsupported placeholders
 - automatic Markdown image and attachment wiring on push
 - richer remote restore artifacts for prune backups
-- mixed push/pull execution across mirrored folder trees
+- richer semantic merge guidance on top of the current semantic preview
+- broader bidirectional execution across unmapped remote pull candidates and safer create flows

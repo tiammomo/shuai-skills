@@ -28,7 +28,7 @@
 
 ## 当前已实测能力
 
-截至 2026-03-15，本仓库已经做过真实飞书联调验证的 tenant 能力包括：
+截至 2026-03-16，本仓库已经做过真实飞书联调验证的 tenant 能力包括：
 
 - 获取 `tenant_access_token`
 - 创建 docx 文档
@@ -41,6 +41,9 @@
 - 单文档高保真 `pull-markdown --fidelity high`
 - 目录级高保真 `pull-dir --fidelity high`
 - 目录级 `sync-dir --dry-run`
+- 目录级 `sync-dir --dry-run --detect-conflicts --include-diff`
+- 目录级 `sync-dir --execute-bidirectional --confirm-bidirectional`
+- 目录级 `sync-dir --execute-bidirectional --confirm-bidirectional --allow-auto-merge --adopt-remote-new --include-create-flow`
 - 目录级 `sync-dir --prune --confirm-prune`
 - 显式媒体上传 `upload-media`
 - 将 Markdown 转换为飞书文档块并追加到远程文档
@@ -78,6 +81,8 @@
 - `upload-media`
 - `sync-dir --dry-run`
 - `sync-dir --dry-run --detect-conflicts`
+- `sync-dir --dry-run --detect-conflicts --include-diff`
+- `sync-dir --execute-bidirectional --confirm-bidirectional`
 - `sync-dir --prune --confirm-prune`
 
 ## 当前边界
@@ -87,9 +92,9 @@
 - user 模式还没有补齐用户视角的文档同步能力
 - 高保真 pull/export 目前只覆盖常见 block，复杂表格、嵌入块和部分高级结构仍需继续补
 - 媒体上传已经可执行，但图片/附件到 Markdown 的自动回填还没有进入当前执行链路
-- 已经具备基于 sync baseline 的 drift / conflict detection，但还没有块级 diff、冲突合并和双向自动 merge
+- 已经具备基于 sync baseline 的 drift / conflict detection，能给出语义级块预览、行级 diff 预览，以及基于 baseline 的语义 merge suggestion
 - `replace-markdown` 当前聚焦根文档正文替换，不处理更复杂的嵌套块树编辑
-- `sync-dir` 目前只开放了 prune 执行，混合 push/pull 仍未进入执行阶段
+- `sync-dir` 虽然已经开放了受保护的 bidirectional execution，并且可通过显式开关纳入 safe auto-merge、unmapped remote adoption、create flow，但默认仍然是 review-first，不会自动处理重叠冲突
 
 ## 对应仓库位置
 
@@ -187,6 +192,72 @@ These additions make the skill more useful for long-running tenant workflows bec
 - 还没有自动冲突合并
 - 还没有真正的 bidirectional execution
 
+## 2026-03-16 Tenant Conflict Diff Preview Additions
+
+这一轮继续沿着第三阶段往前补了一层，新增了：
+
+- `sync-dir --dry-run --detect-conflicts --include-diff`
+- `--diff-fidelity low|high`
+- `--diff-max-lines <N>`
+
+这让当前 skill 在“需要先人工 review 本地和远端到底差在哪，再决定 push / pull / 暂缓处理”的场景下更顺手，因为它现在可以：
+
+- 在现有 drift / conflict classification 结果旁边附带语义级块预览
+- 同时保留截断版 line diff 方便精确核对 Markdown
+- 默认用 `raw_content` 导出的可比较正文做 diff
+- 在 `--diff-fidelity high` 下优先基于 block tree 重建常见 Markdown 结构后再做 diff
+- 用 `--diff-max-lines` 控制每个文件返回的 diff 规模，避免 dry-run 输出失控
+
+在当时那一版里，这一层依然是 review-first，不是自动执行：
+
+- 还没有自动冲突合并
+- 还没有真正的 bidirectional execution
+
+## 2026-03-16 Tenant Semantic Diff And Protected Bidirectional Execution
+
+这一轮继续把第三阶段往前推了一步，新增了：
+
+- 语义级块 diff preview
+- `sync-dir --execute-bidirectional --confirm-bidirectional`
+- `--pull-fidelity low|high`
+
+这让当前 skill 在“已经完成 mapping，并且只想让 clean push / clean pull 自动执行，但又不想放弃安全边界”的场景下更可用了，因为它现在可以：
+
+- 先基于同一套 conflict detection 自动重建执行前计划
+- 仅执行 `bidirectional` 文件里被判定为 `local_ahead` 或 `remote_ahead` 的候选
+- 在 push 前备份当前远端飞书文档
+- 在 pull 前备份当前本地 Markdown 文件
+- 对 `local_and_remote_changed`、`baseline_incomplete`、不可见映射和缺失 doc token 的项直接拦截，不进入执行
+
+这一层当前的边界仍然很明确：
+
+- 默认不会自动 merge 本地和远端改动
+- 默认不会自动为 unmapped remote doc 建立 bidirectional 映射
+- 默认不会把 create flow 和 remote pull candidate 自动并进 bidirectional execution
+
+## 2026-03-16 Tenant Semantic Merge Suggestions And Expanded Bidirectional Execution
+
+这一轮把上面那层再往前补了一段，新增了：
+
+- `local_and_remote_changed` 项的 baseline-aware semantic merge suggestion
+- `sync-dir --execute-bidirectional --confirm-bidirectional --allow-auto-merge`
+- `sync-dir --execute-bidirectional --confirm-bidirectional --adopt-remote-new`
+- `sync-dir --execute-bidirectional --confirm-bidirectional --include-create-flow`
+
+这让当前 skill 在“我愿意继续坚持保护边界，但希望一部分明确安全的 review 项能直接往前走”的场景下更实用了，因为它现在可以：
+
+- 从 `baseline_body_snapshot`、当前本地正文和可比较的远端正文里推导语义 merge suggestion
+- 只对“非重叠语义变化”的 `local_and_remote_changed` 项开放 opt-in auto-merge
+- 把当前可见但尚未映射的 remote doc 作为受保护的 bidirectional adopt pull 处理
+- 把本地未映射的 bidirectional 文件作为受保护的 create flow 处理
+- 在 merge push 前同时备份本地和远端，并在 push 失败时回滚本地合并结果
+
+这一层仍然保留明确边界：
+
+- 不会自动解决重叠冲突或语义不明确的 merge
+- 不会默认开启 auto-merge、remote adoption 或 create flow
+- 还没有进入更强的媒体自动回填和全量 block round-trip
+
 ## 后续优化规划
 
 建议后续继续按这两个方向推进：
@@ -194,4 +265,4 @@ These additions make the skill more useful for long-running tenant workflows bec
 1. 保真度收口
    继续补全高保真 block 覆盖、图片/附件自动映射、以及 prune 备份的 richer export。
 2. 协同决策层
-   在现在这版 review-first conflict detection 上，继续补块级 diff、冲突处置策略，以及真正的双向执行链路。
+   在现在这版带语义 diff preview 和 protected bidirectional execution 的 review-first conflict detection 上，继续补冲突处置策略、语义 merge 建议，以及更广覆盖的双向执行链路。

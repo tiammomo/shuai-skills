@@ -153,6 +153,9 @@ python scripts/feishu_doc_sync.py pull-dir path\\to\\exports
 python scripts/feishu_doc_sync.py pull-dir path\\to\\exports --fidelity high
 python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --dry-run
 python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --dry-run --detect-conflicts
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --dry-run --detect-conflicts --include-diff --diff-fidelity high
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --execute-bidirectional --confirm-bidirectional
+python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --execute-bidirectional --confirm-bidirectional --allow-auto-merge --adopt-remote-new --include-create-flow
 python scripts/feishu_doc_sync.py sync-dir path\\to\\dir --prune --confirm-prune
 ```
 
@@ -174,6 +177,10 @@ Tenant mode is now strong enough for:
 - app-visible low-fidelity or higher-fidelity folder-tree export via `pull-dir`
 - dry-run planning for mixed local/remote tenant sync work
 - dry-run drift and conflict detection for mapped visible docs
+- optional semantic block previews plus truncated line diffs during `sync-dir --dry-run --detect-conflicts`
+- semantic merge suggestions for `local_and_remote_changed` items when a baseline snapshot is available
+- protected bidirectional execution for already mapped clean bidirectional doc pairs
+- opt-in protected execution for safe semantic auto-merge, unmapped remote adoption, and local create flow in bidirectional mode
 - guarded prune execution for index-mapped remote docs with local backups and index cleanup
 - explicit media upload into docx workflows with returned `file_token`
 - app-visible Markdown append into existing docs
@@ -188,8 +195,8 @@ Tenant mode is now strong enough for:
 Tenant mode in this repo still does not yet cover:
 
 - user-personal visibility
-- mixed push and pull document-tree execution beyond guarded prune
-- rich block diffing, automatic conflict resolution, or round-trip fidelity guarantees
+- automatic resolution for overlapping or ambiguous bidirectional conflicts
+- round-trip fidelity guarantees for every block type
 - automatic embedded asset rewrite and richer media round-tripping
 
 ## Related Docs

@@ -39,7 +39,9 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 - Upload one local image or attachment into a Feishu document workflow:
   Use `python scripts/feishu_doc_sync.py upload-media <doc> <path>`, then read [references/markdown-mapping.md](./references/markdown-mapping.md) and [references/tenant-mode.md](./references/tenant-mode.md).
 - Build a directory sync dry-run before any destructive tenant sync extension:
-  Use `python scripts/feishu_doc_sync.py sync-dir <dir> --dry-run`; add `--detect-conflicts` when mapped docs should be classified for local drift, remote drift, and review-required conflicts, then read [references/pull-export.md](./references/pull-export.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
+  Use `python scripts/feishu_doc_sync.py sync-dir <dir> --dry-run`; add `--detect-conflicts` when mapped docs should be classified for local drift, remote drift, and review-required conflicts, and add `--include-diff` when the dry-run should also attach semantic block previews plus truncated local-vs-remote line diffs. `local_and_remote_changed` items now also carry a baseline-aware semantic merge suggestion when the index has a reusable body snapshot, then read [references/pull-export.md](./references/pull-export.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
+- Execute protected bidirectional sync for already mapped clean bidirectional files:
+  Use `python scripts/feishu_doc_sync.py sync-dir <dir> --execute-bidirectional --confirm-bidirectional`; add `--pull-fidelity high` when block-tree pull fidelity is worth the extra API cost, `--allow-auto-merge` when non-overlapping semantic changes may be merged from the stored baseline, `--adopt-remote-new` when visible unmapped remote docs should be pulled in as bidirectional files, and `--include-create-flow` when unmapped local bidirectional files should create new remote docs, then read [references/pull-export.md](./references/pull-export.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
 - Execute explicit prune for index-mapped remote docs whose local Markdown files are gone:
   Use `python scripts/feishu_doc_sync.py sync-dir <dir> --prune --confirm-prune`, then read [references/pull-export.md](./references/pull-export.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
 - Build or finish a user login flow:
@@ -65,8 +67,9 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 6. For one remote document export, use `pull-markdown`.
 7. For one file push, use `push-markdown`.
 8. For one existing document body overwrite, use `replace-markdown` with `--confirm-replace`.
-9. For one directory, use `pull-dir`, `push-dir`, `push-dir --mirror-remote-folders`, `sync-dir --dry-run`, `sync-dir --dry-run --detect-conflicts`, or `sync-dir --prune --confirm-prune` depending on whether you are exporting, writing, mirroring the local folder tree, planning, classifying drift, or pruning remote docs with backups.
-10. Extend richer block coverage, Markdown media round-tripping, diffing, and user-mode sync only after the current tenant-mode mapping, prune safeguards, and permission model are stable.
+9. For one directory, use `pull-dir`, `push-dir`, `push-dir --mirror-remote-folders`, `sync-dir --dry-run`, `sync-dir --dry-run --detect-conflicts --include-diff`, `sync-dir --execute-bidirectional --confirm-bidirectional`, or `sync-dir --prune --confirm-prune` depending on whether you are exporting, writing, mirroring the local folder tree, planning, reviewing semantic drift previews, executing protected bidirectional sync, or pruning remote docs with backups.
+10. Treat `--allow-auto-merge`, `--adopt-remote-new`, and `--include-create-flow` as opt-in expansion switches on top of the protected bidirectional path, not as default behavior.
+11. Extend richer block coverage, automatic media round-tripping, semantic conflict resolution, and user-mode sync only after the current tenant-mode mapping, protected execution, and permission model are stable.
 
 ## Reference Files
 
@@ -83,5 +86,5 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 
 ## Bundled Resources
 
-- `scripts/feishu_doc_sync.py`: CLI for auth validation, tenant-mode doc read/write operations, explicit doc-media upload, folder-aware `push-dir`, selectable-fidelity pull/export, sync-dir prune execution with backups, drift/conflict dry-runs, and local planning flows.
+- `scripts/feishu_doc_sync.py`: CLI for auth validation, tenant-mode doc read/write operations, explicit doc-media upload, folder-aware `push-dir`, selectable-fidelity pull/export, sync-dir prune execution with backups, semantic conflict dry-runs with optional diff previews plus merge suggestions, protected bidirectional execution, and local planning flows.
 - `scripts/check_feishu_skill.py`: local smoke check for the scaffold.

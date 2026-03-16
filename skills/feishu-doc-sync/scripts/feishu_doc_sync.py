@@ -16,7 +16,9 @@ This script currently supports:
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime, timezone
+import difflib
 import hashlib
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +27,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import threading
 import uuid
 import webbrowser
@@ -1637,6 +1640,45 @@ def sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def encode_text_snapshot(text: str) -> Dict[str, Any]:
+    raw_bytes = text.encode("utf-8")
+    compressed = zlib.compress(raw_bytes, level=9)
+    return {
+        "encoding": "zlib+base64:utf-8",
+        "data": base64.b64encode(compressed).decode("ascii"),
+        "length": len(raw_bytes),
+        "content_hash": sha256_text(text),
+    }
+
+
+def decode_text_snapshot(snapshot: Any) -> Optional[str]:
+    if isinstance(snapshot, str):
+        return snapshot
+    if not isinstance(snapshot, dict):
+        return None
+    if str(snapshot.get("encoding") or "") != "zlib+base64:utf-8":
+        return None
+    encoded = snapshot.get("data")
+    if not isinstance(encoded, str) or not encoded:
+        return None
+    try:
+        compressed = base64.b64decode(encoded.encode("ascii"), validate=True)
+        return zlib.decompress(compressed).decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError):
+        return None
+
+
+def extract_index_baseline_body(entry: Dict[str, Any]) -> Optional[str]:
+    for key in ("baseline_body_snapshot", "last_sync_body_snapshot"):
+        text = decode_text_snapshot(entry.get(key))
+        if isinstance(text, str):
+            return text
+    legacy_text = entry.get("baseline_body")
+    if isinstance(legacy_text, str) and legacy_text:
+        return legacy_text
+    return None
+
+
 def split_front_matter(text: str) -> Tuple[Dict[str, Any], str, bool]:
     if text.startswith("\ufeff"):
         text = text.lstrip("\ufeff")
@@ -1943,6 +1985,883 @@ def compose_exported_markdown(
     return front_matter + "\n\n" + body_markdown.rstrip() + "\n"
 
 
+def load_local_diff_body(plan: Dict[str, Any]) -> Dict[str, Any]:
+    path_value = plan.get("path")
+    resolved_path = Path(str(path_value or "")).resolve()
+    if not resolved_path.is_file():
+        return {
+            "ok": False,
+            "path": str(resolved_path),
+            "error": "The local Markdown file is no longer readable, so sync-dir could not build a local diff preview.",
+        }
+
+    front_matter, body, has_front_matter, title = read_markdown_file(resolved_path)
+    return {
+        "ok": True,
+        "path": str(resolved_path),
+        "title": title,
+        "has_front_matter": has_front_matter,
+        "front_matter_keys": sorted(front_matter.keys()),
+        "body_markdown": body,
+        "body_hash": sha256_text(body),
+    }
+
+
+def build_remote_diff_body(
+    document_id: str,
+    tenant_access_token: str,
+    base_url: str,
+    timeout: int,
+    metadata_result: Dict[str, Any],
+    raw_result: Dict[str, Any],
+    fidelity: str = "low",
+    title_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    title = str(title_override or metadata_result.get("title") or document_id).strip() or document_id
+    raw_content = str(raw_result.get("content") or "")
+    degradation_note: Optional[str] = None
+
+    if fidelity == "high":
+        block_result = fetch_all_document_blocks(
+            tenant_access_token=tenant_access_token,
+            document_id=document_id,
+            base_url=base_url,
+            timeout=timeout,
+        )
+        if block_result.get("ok"):
+            rendered_result = render_high_fidelity_markdown(
+                document_id=document_id,
+                document_title=title,
+                block_items=[item for item in block_result.get("items", []) if isinstance(item, dict)],
+            )
+            if rendered_result.get("ok"):
+                body_markdown = str(rendered_result.get("markdown") or "")
+                rendered_blocks = parse_markdown_semantic_blocks(body_markdown)
+                raw_nonempty_lines = [line.strip() for line in raw_content.splitlines() if line.strip()]
+                raw_has_additional_body = len(raw_nonempty_lines) > 1
+                if len(rendered_blocks) <= 1 and raw_has_additional_body:
+                    degradation_note = (
+                        "High-fidelity diff export fell back to raw_content because the block tree did not expose enough body content."
+                    )
+                else:
+                    return {
+                        "ok": True,
+                        "title": str(rendered_result.get("title") or title or document_id),
+                        "fidelity": "high",
+                        "source": "blocks",
+                        "body_markdown": body_markdown,
+                        "body_hash": sha256_text(body_markdown),
+                        "block_count": block_result.get("count"),
+                        "page_count": block_result.get("page_count"),
+                        "unsupported_block_count": rendered_result.get("unsupported_block_count"),
+                        "unsupported_blocks": rendered_result.get("unsupported_blocks"),
+                    }
+            else:
+                degradation_note = (
+                    "High-fidelity diff export fell back to raw_content because block rendering failed."
+                )
+        else:
+            degradation_note = (
+                "High-fidelity diff export fell back to raw_content because document blocks could not be listed."
+            )
+
+    markdown_output = compose_low_fidelity_markdown(
+        title=title,
+        document_id=document_id,
+        raw_content=raw_content,
+        sync_direction="pull",
+    )
+    _, body_markdown, _ = split_front_matter(markdown_output)
+    result = {
+        "ok": True,
+        "title": title,
+        "fidelity": "high" if fidelity == "high" else "low",
+        "source": "raw_content",
+        "body_markdown": body_markdown,
+        "body_hash": sha256_text(body_markdown),
+        "raw_content_hash": raw_result.get("content_hash"),
+        "raw_content_length": raw_result.get("content_length"),
+    }
+    if degradation_note:
+        result["degraded_from"] = "high"
+        result["degradation_note"] = degradation_note
+    return result
+
+
+def render_unified_diff_preview(
+    local_text: str,
+    remote_text: str,
+    *,
+    fromfile: str,
+    tofile: str,
+    max_lines: int = 80,
+) -> Dict[str, Any]:
+    preview_limit = max(1, int(max_lines))
+    diff_lines = list(
+        difflib.unified_diff(
+            local_text.splitlines(),
+            remote_text.splitlines(),
+            fromfile=fromfile,
+            tofile=tofile,
+            lineterm="",
+        )
+    )
+    preview_lines = diff_lines[:preview_limit]
+    return {
+        "has_changes": bool(diff_lines),
+        "line_count": len(diff_lines),
+        "max_lines": preview_limit,
+        "truncated": len(diff_lines) > len(preview_lines),
+        "preview": "\n".join(preview_lines),
+    }
+
+
+def normalize_semantic_block_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip())
+
+
+def build_semantic_block(
+    block_type: str,
+    text: str,
+    *,
+    level: Optional[int] = None,
+    variant: Optional[str] = None,
+    language: Optional[str] = None,
+) -> Dict[str, Any]:
+    normalized_text = normalize_semantic_block_text(text)
+    return {
+        "type": block_type,
+        "level": level,
+        "variant": variant,
+        "language": language,
+        "text": str(text or "").strip(),
+        "normalized_text": normalized_text,
+    }
+
+
+def is_markdown_structural_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if re.match(r"^#{1,6}\s+", stripped):
+        return True
+    if stripped.startswith(">"):
+        return True
+    if stripped.startswith("```"):
+        return True
+    if re.match(r"^([-*+])\s+\[[ xX]\]\s+", stripped):
+        return True
+    if re.match(r"^([-*+])\s+", stripped):
+        return True
+    if re.match(r"^\d+[.)]\s+", stripped):
+        return True
+    if re.match(r"^!\[[^\]]*\]\([^)]+\)\s*$", stripped):
+        return True
+    if re.match(r"^\[[^\]]+\]\([^)]+\)\s*$", stripped):
+        return True
+    if re.match(r"^(-{3,}|\*{3,}|_{3,})\s*$", stripped):
+        return True
+    return False
+
+
+def parse_markdown_semantic_blocks(markdown_text: str) -> List[Dict[str, Any]]:
+    lines = str(markdown_text or "").splitlines()
+    blocks: List[Dict[str, Any]] = []
+    paragraph_lines: List[str] = []
+    index = 0
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        text = "\n".join(line.strip() for line in paragraph_lines if line.strip()).strip()
+        if text:
+            blocks.append(build_semantic_block("paragraph", text))
+        paragraph_lines = []
+
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+
+        if not stripped:
+            flush_paragraph()
+            index += 1
+            continue
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            language = stripped[3:].strip() or None
+            code_lines: List[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            if index < len(lines) and lines[index].strip().startswith("```"):
+                index += 1
+            blocks.append(build_semantic_block("code", "\n".join(code_lines).rstrip(), language=language))
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+        if heading_match:
+            flush_paragraph()
+            blocks.append(
+                build_semantic_block(
+                    "heading",
+                    heading_match.group(2),
+                    level=len(heading_match.group(1)),
+                )
+            )
+            index += 1
+            continue
+
+        if stripped.startswith(">"):
+            flush_paragraph()
+            quote_lines: List[str] = []
+            while index < len(lines):
+                current = lines[index].strip()
+                if not current.startswith(">"):
+                    break
+                quote_lines.append(re.sub(r"^>\s?", "", current))
+                index += 1
+            blocks.append(build_semantic_block("quote", "\n".join(quote_lines).strip()))
+            continue
+
+        task_match = re.match(r"^[-*+]\s+\[([ xX])\]\s+(.+?)\s*$", stripped)
+        if task_match:
+            flush_paragraph()
+            blocks.append(
+                build_semantic_block(
+                    "list_item",
+                    task_match.group(2),
+                    variant="task_done" if task_match.group(1).lower() == "x" else "task_todo",
+                )
+            )
+            index += 1
+            continue
+
+        bullet_match = re.match(r"^[-*+]\s+(.+?)\s*$", stripped)
+        if bullet_match:
+            flush_paragraph()
+            item_lines = [bullet_match.group(1)]
+            next_index = index + 1
+            while next_index < len(lines):
+                continuation = lines[next_index]
+                continuation_stripped = continuation.strip()
+                if not continuation_stripped:
+                    break
+                if is_markdown_structural_line(continuation):
+                    break
+                if continuation.startswith((" ", "\t")):
+                    item_lines.append(continuation_stripped)
+                    next_index += 1
+                    continue
+                break
+            blocks.append(build_semantic_block("list_item", "\n".join(item_lines), variant="bullet"))
+            index = next_index
+            continue
+
+        ordered_match = re.match(r"^(\d+)[.)]\s+(.+?)\s*$", stripped)
+        if ordered_match:
+            flush_paragraph()
+            item_lines = [ordered_match.group(2)]
+            next_index = index + 1
+            while next_index < len(lines):
+                continuation = lines[next_index]
+                continuation_stripped = continuation.strip()
+                if not continuation_stripped:
+                    break
+                if is_markdown_structural_line(continuation):
+                    break
+                if continuation.startswith((" ", "\t")):
+                    item_lines.append(continuation_stripped)
+                    next_index += 1
+                    continue
+                break
+            blocks.append(build_semantic_block("list_item", "\n".join(item_lines), variant="ordered"))
+            index = next_index
+            continue
+
+        image_match = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", stripped)
+        if image_match:
+            flush_paragraph()
+            alt = image_match.group(1).strip()
+            target = image_match.group(2).strip()
+            label = alt or target
+            blocks.append(build_semantic_block("image", label, variant=target))
+            index += 1
+            continue
+
+        link_match = re.match(r"^\[([^\]]+)\]\(([^)]+)\)\s*$", stripped)
+        if link_match:
+            flush_paragraph()
+            name = link_match.group(1).strip()
+            target = link_match.group(2).strip()
+            blocks.append(build_semantic_block("link", name or target, variant=target))
+            index += 1
+            continue
+
+        if re.match(r"^(-{3,}|\*{3,}|_{3,})\s*$", stripped):
+            flush_paragraph()
+            blocks.append(build_semantic_block("divider", stripped))
+            index += 1
+            continue
+
+        paragraph_lines.append(line)
+        index += 1
+
+    flush_paragraph()
+    return blocks
+
+
+def summarize_semantic_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    block_type = str(block.get("type") or "paragraph")
+    level = block.get("level")
+    variant = str(block.get("variant") or "")
+    language = str(block.get("language") or "")
+    normalized_text = str(block.get("normalized_text") or "")
+    label = block_type
+    if block_type == "heading" and isinstance(level, int):
+        label = f"heading-{level}"
+    elif block_type == "list_item":
+        label = variant or "list_item"
+    elif block_type == "code":
+        label = f"code:{language}" if language else "code"
+    elif block_type == "image" and variant:
+        label = f"image:{variant}"
+    elif block_type == "link" and variant:
+        label = f"link:{variant}"
+    preview = normalized_text[:120]
+    if len(normalized_text) > 120:
+        preview += "..."
+    return {
+        "type": block_type,
+        "label": label,
+        "preview": preview,
+        "text": str(block.get("text") or ""),
+    }
+
+
+def semantic_block_signature(block: Dict[str, Any]) -> str:
+    summary = summarize_semantic_block(block)
+    signature_payload = {
+        "type": summary.get("type"),
+        "label": summary.get("label"),
+        "text": normalize_semantic_block_text(summary.get("text")),
+    }
+    return json.dumps(signature_payload, ensure_ascii=False, sort_keys=True)
+
+
+def summarize_semantic_block_slice(blocks: List[Dict[str, Any]], limit: int = 2) -> str:
+    if not blocks:
+        return "(none)"
+    parts: List[str] = []
+    for block in blocks[:limit]:
+        summary = summarize_semantic_block(block)
+        preview = summary.get("preview") or ""
+        parts.append(f"{summary['label']}: {preview}" if preview else str(summary["label"]))
+    if len(blocks) > limit:
+        parts.append(f"+{len(blocks) - limit} more")
+    return " | ".join(parts)
+
+
+def render_semantic_diff_preview(local_text: str, remote_text: str, *, max_lines: int = 80) -> Dict[str, Any]:
+    preview_limit = max(1, int(max_lines))
+    local_blocks = parse_markdown_semantic_blocks(local_text)
+    remote_blocks = parse_markdown_semantic_blocks(remote_text)
+    local_signatures = [semantic_block_signature(block) for block in local_blocks]
+    remote_signatures = [semantic_block_signature(block) for block in remote_blocks]
+    matcher = difflib.SequenceMatcher(a=local_signatures, b=remote_signatures, autojunk=False)
+
+    summary = {
+        "equal_block_count": 0,
+        "replace_block_count": 0,
+        "delete_block_count": 0,
+        "insert_block_count": 0,
+    }
+    operations: List[Dict[str, Any]] = []
+    preview_lines: List[str] = []
+    preview_truncated = False
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        local_slice = local_blocks[i1:i2]
+        remote_slice = remote_blocks[j1:j2]
+        if tag == "equal":
+            summary["equal_block_count"] += len(local_slice)
+            continue
+
+        if tag == "replace":
+            summary["replace_block_count"] += max(len(local_slice), len(remote_slice))
+        elif tag == "delete":
+            summary["delete_block_count"] += len(local_slice)
+        elif tag == "insert":
+            summary["insert_block_count"] += len(remote_slice)
+
+        operation = {
+            "op": tag,
+            "local_count": len(local_slice),
+            "remote_count": len(remote_slice),
+            "local_blocks": [summarize_semantic_block(block) for block in local_slice],
+            "remote_blocks": [summarize_semantic_block(block) for block in remote_slice],
+        }
+        operations.append(operation)
+
+        marker = {
+            "replace": "~",
+            "delete": "-",
+            "insert": "+",
+        }.get(tag, "?")
+        header = (
+            f"{marker} {tag} {len(local_slice)} local block(s) -> {len(remote_slice)} remote block(s)"
+            if tag == "replace"
+            else f"{marker} {tag} {len(local_slice or remote_slice)} block(s)"
+        )
+        candidate_lines = [header]
+        if local_slice:
+            candidate_lines.append("  local: " + summarize_semantic_block_slice(local_slice))
+        if remote_slice:
+            candidate_lines.append("  remote: " + summarize_semantic_block_slice(remote_slice))
+        if len(preview_lines) + len(candidate_lines) <= preview_limit:
+            preview_lines.extend(candidate_lines)
+        else:
+            preview_truncated = True
+
+    if not operations:
+        preview_lines = ["No semantic block changes detected."]
+
+    return {
+        "format": "semantic_blocks",
+        "has_changes": bool(operations),
+        "block_count": {
+            "local": len(local_blocks),
+            "remote": len(remote_blocks),
+        },
+        "summary": summary,
+        "operation_count": len(operations),
+        "operations": operations,
+        "max_lines": preview_limit,
+        "truncated": preview_truncated,
+        "preview": "\n".join(preview_lines[:preview_limit]),
+    }
+
+
+def render_semantic_blocks_to_markdown(blocks: List[Dict[str, Any]]) -> str:
+    rendered: List[str] = []
+    for block in blocks:
+        block_type = str(block.get("type") or "paragraph")
+        text = str(block.get("text") or "").rstrip()
+        if block_type == "heading":
+            level = int(block.get("level") or 1)
+            rendered.append("#" * max(1, min(6, level)) + " " + text.strip())
+            continue
+        if block_type == "quote":
+            quote_text = text.strip()
+            rendered.append("\n".join("> " + line if line else ">" for line in quote_text.splitlines()))
+            continue
+        if block_type == "list_item":
+            variant = str(block.get("variant") or "bullet")
+            prefix = "- "
+            if variant == "ordered":
+                prefix = "1. "
+            elif variant == "task_todo":
+                prefix = "- [ ] "
+            elif variant == "task_done":
+                prefix = "- [x] "
+            lines = text.splitlines() or [""]
+            first = prefix + lines[0].strip()
+            rest = [("  " + line.strip()) if line.strip() else "" for line in lines[1:]]
+            rendered.append("\n".join([first, *rest]).rstrip())
+            continue
+        if block_type == "code":
+            language = str(block.get("language") or "")
+            rendered.append(f"```{language}\n{text}\n```".rstrip())
+            continue
+        if block_type == "image":
+            target = str(block.get("variant") or "").strip()
+            rendered.append(f"![{text}]({target})" if target else f"![{text}]()")
+            continue
+        if block_type == "link":
+            target = str(block.get("variant") or "").strip()
+            rendered.append(f"[{text}]({target})" if target else f"[{text}]()")
+            continue
+        if block_type == "divider":
+            rendered.append("---")
+            continue
+        rendered.append(text.strip())
+    return "\n\n".join(section for section in rendered if section is not None).rstrip() + "\n"
+
+
+def build_semantic_change_operations(
+    base_blocks: List[Dict[str, Any]],
+    side_blocks: List[Dict[str, Any]],
+    *,
+    source: str,
+) -> List[Dict[str, Any]]:
+    base_signatures = [semantic_block_signature(block) for block in base_blocks]
+    side_signatures = [semantic_block_signature(block) for block in side_blocks]
+    matcher = difflib.SequenceMatcher(a=base_signatures, b=side_signatures, autojunk=False)
+    operations: List[Dict[str, Any]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        operations.append(
+            {
+                "source": source,
+                "op": tag,
+                "start": i1,
+                "end": i2,
+                "base_blocks": [dict(block) for block in base_blocks[i1:i2]],
+                "blocks": [dict(block) for block in side_blocks[j1:j2]],
+            }
+        )
+    return operations
+
+
+def semantic_change_operations_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_start = int(left.get("start") or 0)
+    left_end = int(left.get("end") or left_start)
+    right_start = int(right.get("start") or 0)
+    right_end = int(right.get("end") or right_start)
+    left_insert = left_start == left_end
+    right_insert = right_start == right_end
+    if left_insert and right_insert:
+        return left_start == right_start
+    if left_insert:
+        return right_start <= left_start <= right_end
+    if right_insert:
+        return left_start <= right_start <= left_end
+    return not (left_end <= right_start or right_end <= left_start)
+
+
+def semantic_change_operations_equivalent(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    if int(left.get("start") or 0) != int(right.get("start") or 0) or int(left.get("end") or 0) != int(right.get("end") or 0):
+        return False
+    left_signatures = [semantic_block_signature(block) for block in left.get("blocks", []) if isinstance(block, dict)]
+    right_signatures = [semantic_block_signature(block) for block in right.get("blocks", []) if isinstance(block, dict)]
+    return left_signatures == right_signatures
+
+
+def summarize_semantic_change_operation(operation: Dict[str, Any]) -> Dict[str, Any]:
+    blocks = [block for block in operation.get("blocks", []) if isinstance(block, dict)]
+    base_blocks = [block for block in operation.get("base_blocks", []) if isinstance(block, dict)]
+    return {
+        "source": operation.get("source"),
+        "op": operation.get("op"),
+        "start": operation.get("start"),
+        "end": operation.get("end"),
+        "preview": summarize_semantic_block_slice(blocks),
+        "replaces": summarize_semantic_block_slice(base_blocks),
+    }
+
+
+def render_merge_suggestion_preview(
+    local_only_ops: List[Dict[str, Any]],
+    remote_only_ops: List[Dict[str, Any]],
+    conflicts: List[Dict[str, Any]],
+    *,
+    max_lines: int,
+) -> Dict[str, Any]:
+    preview_limit = max(1, int(max_lines))
+    lines: List[str] = []
+    truncated = False
+
+    def add_lines(new_lines: List[str]) -> None:
+        nonlocal truncated
+        if len(lines) + len(new_lines) <= preview_limit:
+            lines.extend(new_lines)
+        else:
+            truncated = True
+
+    for operation in local_only_ops:
+        summary = summarize_semantic_change_operation(operation)
+        add_lines(
+            [
+                f"L {summary['op']} blocks @{summary['start']}:{summary['end']}",
+                f"  keep local: {summary['preview']}",
+            ]
+        )
+    for operation in remote_only_ops:
+        summary = summarize_semantic_change_operation(operation)
+        add_lines(
+            [
+                f"R {summary['op']} blocks @{summary['start']}:{summary['end']}",
+                f"  keep remote: {summary['preview']}",
+            ]
+        )
+    for conflict in conflicts:
+        add_lines(
+            [
+                f"X overlapping changes @{conflict['start']}:{conflict['end']}",
+                f"  local: {conflict['local']}",
+                f"  remote: {conflict['remote']}",
+            ]
+        )
+
+    if not lines:
+        lines = ["No semantic merge actions were derived."]
+    return {
+        "max_lines": preview_limit,
+        "truncated": truncated,
+        "preview": "\n".join(lines[:preview_limit]),
+    }
+
+
+def build_semantic_merge_suggestion(
+    baseline_text: str,
+    local_text: str,
+    remote_text: str,
+    *,
+    max_lines: int = 80,
+) -> Dict[str, Any]:
+    baseline_blocks = parse_markdown_semantic_blocks(baseline_text)
+    local_blocks = parse_markdown_semantic_blocks(local_text)
+    remote_blocks = parse_markdown_semantic_blocks(remote_text)
+    local_ops = build_semantic_change_operations(baseline_blocks, local_blocks, source="local")
+    remote_ops = build_semantic_change_operations(baseline_blocks, remote_blocks, source="remote")
+
+    conflict_local_indices: set[int] = set()
+    conflict_remote_indices: set[int] = set()
+    duplicate_remote_indices: set[int] = set()
+    conflicts: List[Dict[str, Any]] = []
+
+    for local_index, local_op in enumerate(local_ops):
+        for remote_index, remote_op in enumerate(remote_ops):
+            if not semantic_change_operations_overlap(local_op, remote_op):
+                continue
+            if semantic_change_operations_equivalent(local_op, remote_op):
+                duplicate_remote_indices.add(remote_index)
+                continue
+            conflict_local_indices.add(local_index)
+            conflict_remote_indices.add(remote_index)
+            conflicts.append(
+                {
+                    "start": min(int(local_op.get("start") or 0), int(remote_op.get("start") or 0)),
+                    "end": max(int(local_op.get("end") or 0), int(remote_op.get("end") or 0)),
+                    "local": summarize_semantic_block_slice([block for block in local_op.get("blocks", []) if isinstance(block, dict)]),
+                    "remote": summarize_semantic_block_slice([block for block in remote_op.get("blocks", []) if isinstance(block, dict)]),
+                }
+            )
+
+    local_only_ops = [operation for index, operation in enumerate(local_ops) if index not in conflict_local_indices]
+    remote_only_ops = [
+        operation
+        for index, operation in enumerate(remote_ops)
+        if index not in conflict_remote_indices and index not in duplicate_remote_indices
+    ]
+
+    merge_preview = render_merge_suggestion_preview(
+        local_only_ops,
+        remote_only_ops,
+        conflicts,
+        max_lines=max_lines,
+    )
+
+    merged_body_snapshot = None
+    merged_body_hash = None
+    merged_semantic_preview = None
+    auto_merge_ready = not conflicts
+    if auto_merge_ready:
+        merged_blocks = [dict(block) for block in baseline_blocks]
+        combined_ops = local_only_ops + remote_only_ops
+        combined_ops.sort(key=lambda operation: (int(operation.get("start") or 0), int(operation.get("end") or 0)), reverse=True)
+        for operation in combined_ops:
+            start = int(operation.get("start") or 0)
+            end = int(operation.get("end") or start)
+            replacement = [dict(block) for block in operation.get("blocks", []) if isinstance(block, dict)]
+            merged_blocks[start:end] = replacement
+        merged_body = render_semantic_blocks_to_markdown(merged_blocks)
+        merged_body_hash = sha256_text(merged_body)
+        merged_body_snapshot = encode_text_snapshot(merged_body)
+        merged_semantic_preview = render_semantic_diff_preview(baseline_text, merged_body, max_lines=max_lines)
+
+    return {
+        "ok": True,
+        "kind": "semantic_three_way_merge_suggestion",
+        "baseline_available": True,
+        "auto_merge_ready": auto_merge_ready,
+        "summary": {
+            "baseline_block_count": len(baseline_blocks),
+            "local_block_count": len(local_blocks),
+            "remote_block_count": len(remote_blocks),
+            "local_only_change_count": len(local_only_ops),
+            "remote_only_change_count": len(remote_only_ops),
+            "duplicate_change_count": len(duplicate_remote_indices),
+            "conflict_count": len(conflicts),
+        },
+        "local_only_changes": [summarize_semantic_change_operation(operation) for operation in local_only_ops],
+        "remote_only_changes": [summarize_semantic_change_operation(operation) for operation in remote_only_ops],
+        "conflicts": conflicts,
+        "preview": merge_preview.get("preview"),
+        "preview_truncated": merge_preview.get("truncated"),
+        "max_lines": merge_preview.get("max_lines"),
+        "merged_body_hash": merged_body_hash,
+        "merged_body_snapshot": merged_body_snapshot,
+        "merged_preview": merged_semantic_preview,
+    }
+
+
+def build_conflict_merge_suggestion(
+    plan: Dict[str, Any],
+    index_entry: Dict[str, Any],
+    doc_token: str,
+    tenant_access_token: str,
+    base_url: str,
+    timeout: int,
+    metadata_result: Dict[str, Any],
+    raw_result: Dict[str, Any],
+    fidelity: str,
+    max_lines: int,
+) -> Dict[str, Any]:
+    baseline_text = extract_index_baseline_body(index_entry)
+    if not isinstance(baseline_text, str):
+        return {
+            "ok": False,
+            "baseline_available": False,
+            "error": "The index entry does not yet contain a reusable baseline body snapshot, so semantic merge suggestions are unavailable for this file.",
+        }
+
+    local_body_result = load_local_diff_body(plan)
+    if not local_body_result.get("ok"):
+        return {
+            "ok": False,
+            "baseline_available": True,
+            "error": local_body_result.get("error"),
+        }
+
+    remote_body_result = build_remote_diff_body(
+        document_id=doc_token,
+        tenant_access_token=tenant_access_token,
+        base_url=base_url,
+        timeout=timeout,
+        metadata_result=metadata_result,
+        raw_result=raw_result,
+        fidelity=fidelity,
+        title_override=plan.get("title"),
+    )
+    if not remote_body_result.get("ok"):
+        return {
+            "ok": False,
+            "baseline_available": True,
+            "error": "sync-dir could not build a comparable remote Markdown body for semantic merge suggestions.",
+        }
+
+    suggestion = build_semantic_merge_suggestion(
+        baseline_text,
+        str(local_body_result.get("body_markdown") or ""),
+        str(remote_body_result.get("body_markdown") or ""),
+        max_lines=max_lines,
+    )
+    suggestion["baseline_body_hash"] = sha256_text(baseline_text)
+    suggestion["local_body_hash"] = local_body_result.get("body_hash")
+    suggestion["remote_body_hash"] = remote_body_result.get("body_hash")
+    suggestion["fidelity"] = fidelity
+    suggestion["remote_source"] = remote_body_result.get("source")
+    return suggestion
+
+
+def extract_merged_body_text(suggestion: Dict[str, Any]) -> Optional[str]:
+    return decode_text_snapshot(suggestion.get("merged_body_snapshot"))
+
+
+def replace_markdown_body_preserving_front_matter(path: Path, body_markdown: str) -> Dict[str, Any]:
+    resolved_path = path.resolve()
+    if not resolved_path.is_file():
+        return {
+            "ok": False,
+            "path": str(resolved_path),
+            "error": "The local Markdown file is missing, so sync-dir could not write merged content.",
+        }
+
+    text = resolved_path.read_text(encoding="utf-8")
+    front_matter_match = re.match(r"(?s)\A(\ufeff?---\r?\n.*?\r?\n---)(?:\r?\n)*", text)
+    if front_matter_match:
+        rendered = front_matter_match.group(1) + "\n\n" + body_markdown.rstrip() + "\n"
+    else:
+        bom = "\ufeff" if text.startswith("\ufeff") else ""
+        rendered = bom + body_markdown.rstrip() + "\n"
+    resolved_path.write_text(rendered, encoding="utf-8")
+    return {
+        "ok": True,
+        "path": str(resolved_path),
+        "content_hash": sha256_text(rendered),
+        "body_hash": sha256_text(body_markdown),
+    }
+
+
+def build_conflict_diff_preview(
+    plan: Dict[str, Any],
+    doc_token: str,
+    tenant_access_token: str,
+    base_url: str,
+    timeout: int,
+    metadata_result: Dict[str, Any],
+    raw_result: Dict[str, Any],
+    fidelity: str,
+    max_lines: int,
+) -> Dict[str, Any]:
+    local_body_result = load_local_diff_body(plan)
+    if not local_body_result.get("ok"):
+        return {
+            "ok": False,
+            "enabled": True,
+            "fidelity": fidelity,
+            "error": local_body_result.get("error"),
+            "local": local_body_result,
+        }
+
+    remote_body_result = build_remote_diff_body(
+        document_id=doc_token,
+        tenant_access_token=tenant_access_token,
+        base_url=base_url,
+        timeout=timeout,
+        metadata_result=metadata_result,
+        raw_result=raw_result,
+        fidelity=fidelity,
+        title_override=plan.get("title"),
+    )
+    if not remote_body_result.get("ok"):
+        return {
+            "ok": False,
+            "enabled": True,
+            "fidelity": fidelity,
+            "error": "sync-dir could not build a comparable remote Markdown body for diff review.",
+            "remote": remote_body_result,
+        }
+
+    semantic_preview = render_semantic_diff_preview(
+        str(local_body_result.get("body_markdown") or ""),
+        str(remote_body_result.get("body_markdown") or ""),
+        max_lines=max_lines,
+    )
+    unified_preview = render_unified_diff_preview(
+        str(local_body_result.get("body_markdown") or ""),
+        str(remote_body_result.get("body_markdown") or ""),
+        fromfile=f"local:{plan.get('relative_path') or plan.get('path') or doc_token}",
+        tofile=f"feishu:{doc_token}",
+        max_lines=max_lines,
+    )
+    diff_preview = {
+        **semantic_preview,
+        "preview": semantic_preview.get("preview"),
+        "line_preview": unified_preview,
+    }
+    diff_preview.update(
+        {
+            "ok": True,
+            "enabled": True,
+            "fidelity": fidelity,
+            "remote_source": remote_body_result.get("source"),
+            "local_title": local_body_result.get("title"),
+            "remote_title": remote_body_result.get("title"),
+            "local_body_hash": local_body_result.get("body_hash"),
+            "remote_body_hash": remote_body_result.get("body_hash"),
+        }
+    )
+    if remote_body_result.get("degraded_from"):
+        diff_preview["degraded_from"] = remote_body_result.get("degraded_from")
+        diff_preview["degradation_note"] = remote_body_result.get("degradation_note")
+    if remote_body_result.get("unsupported_block_count"):
+        diff_preview["unsupported_block_count"] = remote_body_result.get("unsupported_block_count")
+    return diff_preview
+
+
 def normalize_optional_int(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return None
@@ -2145,6 +3064,9 @@ def inspect_sync_dir_conflicts(
     tenant_access_token: str,
     base_url: str,
     timeout: int,
+    include_diff: bool = False,
+    diff_fidelity: str = "low",
+    diff_max_lines: int = 80,
 ) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     risks: List[Dict[str, Any]] = []
@@ -2152,6 +3074,11 @@ def inspect_sync_dir_conflicts(
     action_counts: Dict[str, int] = {}
     inspected_count = 0
     failed_count = 0
+    diff_generated_count = 0
+    diff_failed_count = 0
+    merge_generated_count = 0
+    merge_failed_count = 0
+    merge_auto_ready_count = 0
 
     for plan in local_plans:
         doc_token = str(plan.get("doc_token") or "")
@@ -2252,6 +3179,61 @@ def inspect_sync_dir_conflicts(
             "remote": remote_state,
             "comparison": comparison,
         }
+        if include_diff:
+            diff_preview = build_conflict_diff_preview(
+                plan=plan,
+                doc_token=doc_token,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                metadata_result=metadata_result,
+                raw_result=raw_result,
+                fidelity=diff_fidelity,
+                max_lines=diff_max_lines,
+            )
+            result["diff"] = diff_preview
+            if diff_preview.get("ok"):
+                diff_generated_count += 1
+            else:
+                diff_failed_count += 1
+                risks.append(
+                    {
+                        "kind": "conflict_diff_failed",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "message": diff_preview.get("error")
+                        or "sync-dir could not build a local vs remote diff preview for this mapped file.",
+                    }
+                )
+        if status == "local_and_remote_changed":
+            merge_suggestion = build_conflict_merge_suggestion(
+                plan=plan,
+                index_entry=index_entry,
+                doc_token=doc_token,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                metadata_result=metadata_result,
+                raw_result=raw_result,
+                fidelity=diff_fidelity,
+                max_lines=diff_max_lines,
+            )
+            result["merge_suggestion"] = merge_suggestion
+            if merge_suggestion.get("ok"):
+                merge_generated_count += 1
+                if merge_suggestion.get("auto_merge_ready"):
+                    merge_auto_ready_count += 1
+            else:
+                merge_failed_count += 1
+                if merge_suggestion.get("error"):
+                    risks.append(
+                        {
+                            "kind": "merge_suggestion_unavailable",
+                            "relative_path": relative_path,
+                            "doc_token": doc_token,
+                            "message": str(merge_suggestion.get("error")),
+                        }
+                    )
         results.append(result)
         if comparison.get("requires_review"):
             risks.append(
@@ -2277,6 +3259,20 @@ def inspect_sync_dir_conflicts(
         "review_required_count": review_required_count,
         "state_counts": state_counts,
         "recommended_action_counts": action_counts,
+        "diff": {
+            "enabled": bool(include_diff),
+            "fidelity": diff_fidelity if include_diff else None,
+            "max_lines": max(1, int(diff_max_lines)) if include_diff else None,
+            "generated_count": diff_generated_count,
+            "failed_count": diff_failed_count,
+        },
+        "merge_suggestions": {
+            "enabled": True,
+            "fidelity": diff_fidelity,
+            "generated_count": merge_generated_count,
+            "failed_count": merge_failed_count,
+            "auto_merge_ready_count": merge_auto_ready_count,
+        },
         "results": results,
         "risks": risks,
     }
@@ -2739,12 +3735,16 @@ def backup_index_snapshot(index_path: Path, backup_run_dir: Path) -> Dict[str, A
     }
 
 
-def backup_remote_document_for_prune(
+def backup_remote_document_snapshot(
     candidate: Dict[str, Any],
     tenant_access_token: str,
     base_url: str,
     timeout: int,
     backup_run_dir: Path,
+    *,
+    scope: str = "remote-docs",
+    fidelity: str = "low",
+    backup_reason: str = "sync safety backup",
 ) -> Dict[str, Any]:
     doc_token = str(candidate.get("doc_token") or "")
     relative_path = str(candidate.get("relative_path") or "")
@@ -2754,7 +3754,7 @@ def backup_remote_document_for_prune(
             "ok": False,
             "doc_token": None,
             "relative_path": relative_path,
-            "error": "Missing doc_token for prune backup.",
+            "error": "Missing doc_token for remote backup.",
         }
 
     metadata_result = probe_document_connectivity(
@@ -2770,7 +3770,7 @@ def backup_remote_document_for_prune(
             "relative_path": relative_path,
             "title": title_hint,
             "metadata": metadata_result,
-            "error": "Failed to fetch document metadata before prune.",
+            "error": "Failed to fetch document metadata before remote backup.",
         }
 
     raw_result = get_document_raw_content(
@@ -2787,29 +3787,54 @@ def backup_remote_document_for_prune(
             "title": title_hint,
             "metadata": metadata_result,
             "raw_content": raw_result,
-            "error": "Failed to fetch raw_content before prune.",
+            "error": "Failed to fetch raw_content before remote backup.",
         }
 
     title = str(metadata_result.get("title") or title_hint or doc_token)
     candidate_slug = sanitize_path_component(relative_path or title or doc_token, fallback=doc_token)
     token_slug = sanitize_path_component(doc_token[-6:] if len(doc_token) >= 6 else doc_token, fallback="token")
-    candidate_dir = backup_run_dir / "remote-docs" / f"{candidate_slug}-{token_slug}"
+    candidate_dir = backup_run_dir / scope / f"{candidate_slug}-{token_slug}"
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
     markdown_path = candidate_dir / "document.md"
     raw_content_path = candidate_dir / "raw-content.txt"
     metadata_path = candidate_dir / "metadata.json"
-
-    markdown_output = compose_low_fidelity_markdown(
-        title=title,
+    export_result = build_remote_diff_body(
         document_id=doc_token,
-        raw_content=str(raw_result.get("content") or ""),
+        tenant_access_token=tenant_access_token,
+        base_url=base_url,
+        timeout=timeout,
+        metadata_result=metadata_result,
+        raw_result=raw_result,
+        fidelity=fidelity,
+        title_override=title,
+    )
+    if not export_result.get("ok"):
+        return {
+            "ok": False,
+            "doc_token": doc_token,
+            "relative_path": relative_path,
+            "title": title,
+            "metadata": metadata_result,
+            "raw_content": raw_result,
+            "export": export_result,
+            "error": "Failed to build the remote Markdown backup payload.",
+        }
+
+    export_title = str(export_result.get("title") or title or doc_token)
+    export_fidelity = "blocks" if export_result.get("source") == "blocks" else "raw_content"
+    markdown_output = compose_exported_markdown(
+        title=export_title,
+        document_id=doc_token,
+        body_markdown=str(export_result.get("body_markdown") or ""),
         sync_direction="pull",
+        fidelity=export_fidelity,
     )
     markdown_path.write_text(markdown_output, encoding="utf-8")
     raw_content_path.write_text(str(raw_result.get("content") or ""), encoding="utf-8")
     snapshot_payload = {
         "backed_up_at": current_timestamp_utc(),
+        "reason": backup_reason,
         "candidate": candidate,
         "metadata": {
             "document_id": metadata_result.get("document_id"),
@@ -2820,6 +3845,14 @@ def backup_remote_document_for_prune(
         "raw_content": {
             "content_length": raw_result.get("content_length"),
             "content_hash": raw_result.get("content_hash"),
+        },
+        "export": {
+            "requested_fidelity": fidelity,
+            "source": export_result.get("source"),
+            "body_hash": export_result.get("body_hash"),
+            "degraded_from": export_result.get("degraded_from"),
+            "degradation_note": export_result.get("degradation_note"),
+            "unsupported_block_count": export_result.get("unsupported_block_count"),
         },
     }
     write_json_file(metadata_path, snapshot_payload)
@@ -2833,8 +3866,71 @@ def backup_remote_document_for_prune(
         "markdown_path": str(markdown_path),
         "raw_content_path": str(raw_content_path),
         "metadata_path": str(metadata_path),
+        "fidelity": fidelity,
+        "export_source": export_result.get("source"),
+        "body_hash": export_result.get("body_hash"),
         "raw_content_hash": raw_result.get("content_hash"),
         "raw_content_length": raw_result.get("content_length"),
+        "degraded_from": export_result.get("degraded_from"),
+        "degradation_note": export_result.get("degradation_note"),
+    }
+
+
+def backup_remote_document_for_prune(
+    candidate: Dict[str, Any],
+    tenant_access_token: str,
+    base_url: str,
+    timeout: int,
+    backup_run_dir: Path,
+) -> Dict[str, Any]:
+    return backup_remote_document_snapshot(
+        candidate=candidate,
+        tenant_access_token=tenant_access_token,
+        base_url=base_url,
+        timeout=timeout,
+        backup_run_dir=backup_run_dir,
+        scope="remote-docs",
+        fidelity="low",
+        backup_reason="sync-dir prune backup",
+    )
+
+
+def backup_local_markdown_snapshot(
+    file_path: Path,
+    relative_path: str,
+    backup_run_dir: Path,
+    *,
+    reason: str = "sync safety backup",
+) -> Dict[str, Any]:
+    resolved_path = file_path.resolve()
+    if not resolved_path.is_file():
+        return {
+            "ok": False,
+            "path": str(resolved_path),
+            "relative_path": relative_path,
+            "error": "The local Markdown file is missing, so sync-dir could not create a local backup snapshot.",
+        }
+
+    backup_path = (backup_run_dir / "local-files" / relative_path).resolve()
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(resolved_path, backup_path)
+    metadata_path = backup_path.with_suffix(backup_path.suffix + ".metadata.json")
+    write_json_file(
+        metadata_path,
+        {
+            "backed_up_at": current_timestamp_utc(),
+            "reason": reason,
+            "path": str(resolved_path),
+            "relative_path": relative_path,
+            "content_hash": sha256_text(resolved_path.read_text(encoding="utf-8")),
+        },
+    )
+    return {
+        "ok": True,
+        "path": str(resolved_path),
+        "relative_path": relative_path,
+        "backup_path": str(backup_path),
+        "metadata_path": str(metadata_path),
     }
 
 
@@ -3003,6 +4099,7 @@ def execute_pull_markdown(
                 "title": resolved_title,
                 "content_hash": write_result.get("content_hash"),
                 "body_hash": body_hash,
+                "baseline_body_snapshot": encode_text_snapshot(body_markdown_output),
                 "last_sync_at": current_timestamp_utc(),
                 "sync_direction": sync_direction,
                 "folder_token": folder_token,
@@ -3052,6 +4149,9 @@ def build_sync_dir_dry_run(
     max_pages: int = 20,
     prune: bool = False,
     detect_conflicts: bool = False,
+    include_diff: bool = False,
+    diff_fidelity: str = "low",
+    diff_max_lines: int = 80,
 ) -> Dict[str, Any]:
     resolved_root = root.resolve()
     if not resolved_root.is_dir():
@@ -3175,6 +4275,9 @@ def build_sync_dir_dry_run(
             tenant_access_token=tenant_access_token,
             base_url=base_url,
             timeout=timeout,
+            include_diff=include_diff,
+            diff_fidelity=diff_fidelity,
+            diff_max_lines=diff_max_lines,
         )
         risks.extend(conflict_detection.get("risks", []))
 
@@ -3193,6 +4296,11 @@ def build_sync_dir_dry_run(
                 "inspected_mapped_doc_count": conflict_detection.get("inspected_count", 0),
                 "conflict_review_count": conflict_detection.get("review_required_count", 0),
                 "conflict_inspection_failed_count": conflict_detection.get("failed_count", 0),
+                "conflict_diff_preview_count": conflict_detection.get("diff", {}).get("generated_count", 0),
+                "conflict_diff_failed_count": conflict_detection.get("diff", {}).get("failed_count", 0),
+                "merge_suggestion_count": conflict_detection.get("merge_suggestions", {}).get("generated_count", 0),
+                "merge_suggestion_failed_count": conflict_detection.get("merge_suggestions", {}).get("failed_count", 0),
+                "merge_auto_ready_count": conflict_detection.get("merge_suggestions", {}).get("auto_merge_ready_count", 0),
             }
         )
 
@@ -3229,7 +4337,750 @@ def build_sync_dir_dry_run(
             ]
             if detect_conflicts
             else []
+        )
+        + (
+            [
+                f"With --include-diff, each inspected file also includes a semantic block diff preview plus a truncated {diff_fidelity}-fidelity line diff capped at {max(1, int(diff_max_lines))} lines."
+            ]
+            if detect_conflicts and include_diff
+            else []
         ),
+    }
+
+
+def build_bidirectional_sync_execution_plan(
+    plan: Dict[str, Any],
+    *,
+    allow_auto_merge: bool = False,
+    adopt_remote_new: bool = False,
+    include_create_flow: bool = False,
+) -> Dict[str, Any]:
+    conflict_detection = plan.get("conflict_detection")
+    local_plans = [item for item in plan.get("local_plans", []) if isinstance(item, dict)]
+    if not isinstance(conflict_detection, dict) or not conflict_detection.get("enabled"):
+        return {
+            "ok": False,
+            "error": "Protected bidirectional execution requires sync-dir conflict detection data.",
+            "actions": [],
+            "blocked": [],
+            "skipped": [],
+        }
+
+    conflict_results_by_relative_path = {
+        str(item.get("relative_path") or ""): item
+        for item in conflict_detection.get("results", [])
+        if isinstance(item, dict) and str(item.get("relative_path") or "")
+    }
+    risk_kinds_by_relative_path: Dict[str, List[str]] = {}
+    for risk in plan.get("risks", []):
+        if not isinstance(risk, dict):
+            continue
+        relative_path = str(risk.get("relative_path") or "")
+        if not relative_path:
+            continue
+        risk_kinds_by_relative_path.setdefault(relative_path, []).append(str(risk.get("kind") or "risk"))
+
+    actions: List[Dict[str, Any]] = []
+    blocked: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    bidirectional_file_count = 0
+
+    for local_plan in local_plans:
+        relative_path = str(local_plan.get("relative_path") or "")
+        sync_direction = normalize_sync_direction(local_plan.get("sync_direction"))
+        if sync_direction != "bidirectional":
+            continue
+        bidirectional_file_count += 1
+
+        doc_token = str(local_plan.get("doc_token") or "")
+        if not doc_token:
+            planned_action = str(local_plan.get("action") or "")
+            if include_create_flow and planned_action in {"create_doc_in_root", "create_doc_in_folder"}:
+                actions.append(
+                    {
+                        "mode": "create_push",
+                        "relative_path": relative_path,
+                        "doc_token": None,
+                        "title": local_plan.get("title"),
+                        "plan": local_plan,
+                    }
+                )
+            else:
+                blocked.append(
+                    {
+                        "relative_path": relative_path,
+                        "doc_token": None,
+                        "status": "missing_doc_token",
+                        "recommended_action": "review_mapping",
+                        "message": "This bidirectional file is not mapped to a Feishu doc token yet, so protected execution will not invent a new mapping or create a remote doc automatically unless --include-create-flow is enabled.",
+                    }
+                )
+            continue
+
+        conflict_result = conflict_results_by_relative_path.get(relative_path)
+        if not isinstance(conflict_result, dict):
+            blocked.append(
+                {
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "status": "not_inspected",
+                    "recommended_action": "review_remote_visibility",
+                    "message": "This bidirectional file could not be inspected during sync-dir planning, so protected execution will not proceed.",
+                    "risk_kinds": risk_kinds_by_relative_path.get(relative_path, []),
+                }
+            )
+            continue
+
+        if not conflict_result.get("ok"):
+            blocked.append(
+                {
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "status": str(conflict_result.get("status") or "inspect_failed"),
+                    "recommended_action": str(conflict_result.get("recommended_action") or "review_remote_access"),
+                    "message": "Remote inspection failed for this bidirectional file, so protected execution will not proceed.",
+                    "inspection": conflict_result,
+                }
+            )
+            continue
+
+        comparison = conflict_result.get("comparison") if isinstance(conflict_result.get("comparison"), dict) else {}
+        status = str(comparison.get("status") or "")
+        if status == "local_ahead":
+            actions.append(
+                {
+                    "mode": "push",
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": conflict_result.get("title") or local_plan.get("title"),
+                    "plan": local_plan,
+                    "inspection": conflict_result,
+                }
+            )
+            continue
+        if status == "remote_ahead":
+            actions.append(
+                {
+                    "mode": "pull",
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": conflict_result.get("title") or local_plan.get("title"),
+                    "plan": local_plan,
+                    "inspection": conflict_result,
+                }
+            )
+            continue
+        if status == "local_and_remote_changed":
+            merge_suggestion = conflict_result.get("merge_suggestion") if isinstance(conflict_result.get("merge_suggestion"), dict) else {}
+            merged_body = extract_merged_body_text(merge_suggestion) if isinstance(merge_suggestion, dict) else None
+            if (
+                allow_auto_merge
+                and merge_suggestion.get("ok")
+                and merge_suggestion.get("auto_merge_ready")
+                and isinstance(merged_body, str)
+                and merged_body.strip()
+            ):
+                actions.append(
+                    {
+                        "mode": "merge_push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": conflict_result.get("title") or local_plan.get("title"),
+                        "plan": local_plan,
+                        "inspection": conflict_result,
+                        "merge_suggestion": merge_suggestion,
+                    }
+                )
+                continue
+        if status == "in_sync":
+            skipped.append(
+                {
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "status": status,
+                    "message": str(comparison.get("message") or "The local and remote versions are already in sync."),
+                }
+            )
+            continue
+
+        blocked.append(
+            {
+                "relative_path": relative_path,
+                "doc_token": doc_token,
+                "status": status or "review_required",
+                "recommended_action": str(comparison.get("recommended_action") or "manual_review"),
+                "message": str(
+                    comparison.get("message")
+                    or "Protected bidirectional execution only proceeds when the file is cleanly local_ahead or remote_ahead."
+                ),
+                "inspection": conflict_result,
+            }
+        )
+
+    remote_pull_candidates = [item for item in plan.get("remote_pull_candidates", []) if isinstance(item, dict)]
+    if adopt_remote_new:
+        for candidate in remote_pull_candidates:
+            actions.append(
+                {
+                    "mode": "adopt_remote_pull",
+                    "relative_path": str(candidate.get("relative_path") or ""),
+                    "doc_token": str(candidate.get("doc_token") or ""),
+                    "title": candidate.get("title"),
+                    "candidate": candidate,
+                }
+            )
+
+    summary = {
+        "bidirectional_file_count": bidirectional_file_count,
+        "actionable_count": len(actions),
+        "push_count": sum(1 for item in actions if item.get("mode") == "push"),
+        "pull_count": sum(1 for item in actions if item.get("mode") == "pull"),
+        "merge_count": sum(1 for item in actions if item.get("mode") == "merge_push"),
+        "create_count": sum(1 for item in actions if item.get("mode") == "create_push"),
+        "adopt_count": sum(1 for item in actions if item.get("mode") == "adopt_remote_pull"),
+        "push_like_count": sum(1 for item in actions if item.get("mode") in {"push", "merge_push", "create_push"}),
+        "pull_like_count": sum(1 for item in actions if item.get("mode") in {"pull", "adopt_remote_pull"}),
+        "blocked_count": len(blocked),
+        "in_sync_count": len(skipped),
+        "remote_candidate_count": len(remote_pull_candidates),
+    }
+    return {
+        "ok": len(blocked) == 0,
+        "summary": summary,
+        "actions": actions,
+        "blocked": blocked,
+        "skipped": skipped,
+    }
+
+
+def execute_sync_dir_bidirectional(
+    root: Path,
+    tenant_access_token: str,
+    base_url: str,
+    timeout: int,
+    folder_token: Optional[str] = None,
+    index_path: Optional[str] = None,
+    recursive: bool = True,
+    max_depth: int = 20,
+    page_size: int = 100,
+    max_pages: int = 20,
+    backup_dir: Optional[str] = None,
+    continue_on_error: bool = False,
+    pull_fidelity: str = "low",
+    allow_auto_merge: bool = False,
+    adopt_remote_new: bool = False,
+    include_create_flow: bool = False,
+) -> Dict[str, Any]:
+    plan = build_sync_dir_dry_run(
+        root=root,
+        tenant_access_token=tenant_access_token,
+        base_url=base_url,
+        timeout=timeout,
+        folder_token=folder_token,
+        index_path=index_path,
+        recursive=recursive,
+        max_depth=max_depth,
+        page_size=page_size,
+        max_pages=max_pages,
+        prune=False,
+        detect_conflicts=True,
+        diff_fidelity="high" if allow_auto_merge else "low",
+    )
+    if not plan.get("ok"):
+        return {
+            "ok": False,
+            "error": plan.get("error", "Failed to build the sync-dir bidirectional plan."),
+            "plan": plan,
+        }
+
+    execution_plan = build_bidirectional_sync_execution_plan(
+        plan,
+        allow_auto_merge=allow_auto_merge,
+        adopt_remote_new=adopt_remote_new,
+        include_create_flow=include_create_flow,
+    )
+    resolved_root = Path(str(plan["root"])).resolve()
+    effective_index_path = Path(str(plan["index_path"])).resolve()
+    notes = [
+        "Protected bidirectional execution only acts on bidirectional items that were classified into an explicit execution mode by sync-dir planning.",
+        "The command blocks before any write when review-required, invisible, or incompletely mapped bidirectional files are still present.",
+    ]
+    if allow_auto_merge:
+        notes.append(
+            "With --allow-auto-merge, sync-dir may merge non-overlapping semantic block changes from a stored baseline snapshot before pushing the merged Markdown back to Feishu."
+        )
+    if adopt_remote_new:
+        notes.append(
+            "With --adopt-remote-new, visible unmapped remote docs become bidirectional pull targets and receive local Markdown files plus index mappings."
+        )
+    if include_create_flow:
+        notes.append(
+            "With --include-create-flow, unmapped local bidirectional files can create new remote Feishu docs during protected execution."
+        )
+
+    if not execution_plan.get("ok"):
+        return {
+            "ok": False,
+            "root": str(resolved_root),
+            "index_path": str(effective_index_path),
+            "dry_run": False,
+            "bidirectional": True,
+            "summary": dict(plan.get("summary", {}), **execution_plan.get("summary", {}), failed_count=0),
+            "local_plans": plan.get("local_plans", []),
+            "remote_listing": plan.get("remote_listing", {}),
+            "remote_pull_candidates": plan.get("remote_pull_candidates", []),
+            "conflict_detection": plan.get("conflict_detection"),
+            "execution_plan": execution_plan,
+            "execution_results": [],
+            "backup": None,
+            "risks": plan.get("risks", []),
+            "error": "Protected bidirectional execution was blocked because at least one bidirectional file still requires review or has an incomplete mapping.",
+            "notes": notes + [
+                "Re-run sync-dir with --dry-run --detect-conflicts --include-diff to review the blocked files before executing again.",
+            ],
+        }
+
+    actions = [item for item in execution_plan.get("actions", []) if isinstance(item, dict)]
+    if not actions:
+        return {
+            "ok": True,
+            "root": str(resolved_root),
+            "index_path": str(effective_index_path),
+            "dry_run": False,
+            "bidirectional": True,
+            "summary": dict(plan.get("summary", {}), **execution_plan.get("summary", {}), failed_count=0),
+            "local_plans": plan.get("local_plans", []),
+            "remote_listing": plan.get("remote_listing", {}),
+            "remote_pull_candidates": plan.get("remote_pull_candidates", []),
+            "conflict_detection": plan.get("conflict_detection"),
+            "execution_plan": execution_plan,
+            "execution_results": [],
+            "backup": None,
+            "risks": plan.get("risks", []),
+            "notes": notes + ["No actionable bidirectional push, pull, merge, create, or adopt candidates were found, so no writes were executed."],
+        }
+
+    backup_run_dir = resolve_sync_backup_run_dir(resolved_root, backup_dir, prefix="sync-dir-bidirectional")
+    backup_plan_path = backup_run_dir / "sync-dir-plan.json"
+    write_json_file(backup_plan_path, plan)
+    execution_plan_path = backup_run_dir / "bidirectional-execution-plan.json"
+    write_json_file(execution_plan_path, execution_plan)
+    index_snapshot = backup_index_snapshot(effective_index_path, backup_run_dir)
+
+    execution_results: List[Dict[str, Any]] = []
+    pushed_relative_paths: List[str] = []
+    pulled_relative_paths: List[str] = []
+    merged_relative_paths: List[str] = []
+    created_relative_paths: List[str] = []
+    adopted_relative_paths: List[str] = []
+    failed_count = 0
+
+    for action in actions:
+        relative_path = str(action.get("relative_path") or "")
+        doc_token = str(action.get("doc_token") or "")
+        title = str(action.get("title") or doc_token)
+        local_plan = action.get("plan") if isinstance(action.get("plan"), dict) else {}
+        action_mode = str(action.get("mode") or "")
+        local_path = Path(str(local_plan.get("path") or resolved_root / relative_path)).resolve()
+
+        if action_mode == "push":
+            remote_backup = backup_remote_document_snapshot(
+                candidate={
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                },
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                backup_run_dir=backup_run_dir,
+                scope="remote-before-push",
+                fidelity="high",
+                backup_reason="sync-dir protected bidirectional push backup",
+            )
+            if not remote_backup.get("ok"):
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": remote_backup,
+                        "execute": None,
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            push_result = execute_push_markdown(
+                markdown_path=local_path,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                root=resolved_root,
+                index_path=str(effective_index_path),
+                confirm_replace=True,
+                ignore_sync_direction=True,
+            )
+            execution_results.append(
+                {
+                    "ok": bool(push_result.get("ok")),
+                    "mode": "push",
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                    "backup": remote_backup,
+                    "execute": push_result,
+                }
+            )
+            if push_result.get("ok") and not push_result.get("skipped"):
+                pushed_relative_paths.append(relative_path)
+                continue
+
+            failed_count += 1
+            if not continue_on_error:
+                break
+            continue
+
+        if action_mode == "merge_push":
+            merge_suggestion = action.get("merge_suggestion") if isinstance(action.get("merge_suggestion"), dict) else {}
+            local_backup = backup_local_markdown_snapshot(
+                file_path=local_path,
+                relative_path=relative_path,
+                backup_run_dir=backup_run_dir,
+                reason="sync-dir protected bidirectional merge local backup",
+            )
+            if not local_backup.get("ok"):
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "merge_push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": {"local": local_backup, "remote": None},
+                        "execute": None,
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            remote_backup = backup_remote_document_snapshot(
+                candidate={
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                },
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                backup_run_dir=backup_run_dir,
+                scope="remote-before-merge-push",
+                fidelity="high",
+                backup_reason="sync-dir protected bidirectional merge backup",
+            )
+            if not remote_backup.get("ok"):
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "merge_push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": {"local": local_backup, "remote": remote_backup},
+                        "execute": None,
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            merged_body = extract_merged_body_text(merge_suggestion)
+            if not isinstance(merged_body, str) or not merged_body.strip():
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "merge_push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": {"local": local_backup, "remote": remote_backup},
+                        "execute": None,
+                        "error": "The semantic merge suggestion did not contain a reusable merged Markdown body.",
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            local_merge_write = replace_markdown_body_preserving_front_matter(local_path, merged_body)
+            if not local_merge_write.get("ok"):
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "merge_push",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": {"local": local_backup, "remote": remote_backup},
+                        "local_merge_write": local_merge_write,
+                        "execute": None,
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            push_result = execute_push_markdown(
+                markdown_path=local_path,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                root=resolved_root,
+                index_path=str(effective_index_path),
+                confirm_replace=True,
+                ignore_sync_direction=True,
+            )
+            restore_result = None
+            if not push_result.get("ok") or push_result.get("skipped"):
+                backup_path = Path(str(local_backup.get("backup_path") or "")).resolve()
+                try:
+                    shutil.copy2(backup_path, local_path)
+                    restore_result = {
+                        "ok": True,
+                        "path": str(local_path),
+                        "backup_path": str(backup_path),
+                    }
+                except OSError as exc:
+                    restore_result = {
+                        "ok": False,
+                        "path": str(local_path),
+                        "backup_path": str(backup_path),
+                        "error": str(exc),
+                    }
+
+            execution_results.append(
+                {
+                    "ok": bool(push_result.get("ok")) and not push_result.get("skipped"),
+                    "mode": "merge_push",
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                    "backup": {"local": local_backup, "remote": remote_backup},
+                    "local_merge_write": local_merge_write,
+                    "restore_local": restore_result,
+                    "execute": push_result,
+                }
+            )
+            if push_result.get("ok") and not push_result.get("skipped"):
+                pushed_relative_paths.append(relative_path)
+                merged_relative_paths.append(relative_path)
+                continue
+
+            failed_count += 1
+            if not continue_on_error:
+                break
+            continue
+
+        if action_mode == "create_push":
+            folder_token_override = str(local_plan.get("folder_token") or folder_token or "") or None
+            push_result = execute_push_markdown(
+                markdown_path=local_path,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                root=resolved_root,
+                index_path=str(effective_index_path),
+                folder_token_override=folder_token_override,
+                confirm_replace=False,
+                ignore_sync_direction=True,
+            )
+            execution_results.append(
+                {
+                    "ok": bool(push_result.get("ok")) and not push_result.get("skipped"),
+                    "mode": "create_push",
+                    "relative_path": relative_path,
+                    "doc_token": str(push_result.get("index_entry", {}).get("doc_token") or ""),
+                    "title": title,
+                    "backup": None,
+                    "execute": push_result,
+                }
+            )
+            if push_result.get("ok") and not push_result.get("skipped"):
+                pushed_relative_paths.append(relative_path)
+                created_relative_paths.append(relative_path)
+                continue
+
+            failed_count += 1
+            if not continue_on_error:
+                break
+            continue
+
+        if action_mode == "pull":
+            local_backup = backup_local_markdown_snapshot(
+                file_path=local_path,
+                relative_path=relative_path,
+                backup_run_dir=backup_run_dir,
+                reason="sync-dir protected bidirectional pull backup",
+            )
+            if not local_backup.get("ok"):
+                failed_count += 1
+                execution_results.append(
+                    {
+                        "ok": False,
+                        "mode": "pull",
+                        "relative_path": relative_path,
+                        "doc_token": doc_token,
+                        "title": title,
+                        "backup": local_backup,
+                        "execute": None,
+                    }
+                )
+                if not continue_on_error:
+                    break
+                continue
+
+            pull_result = execute_pull_markdown(
+                document_id=doc_token,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                output_path=str(local_path),
+                root=resolved_root,
+                index_path=str(effective_index_path),
+                overwrite=True,
+                sync_direction="bidirectional",
+                title_override=title,
+                relative_path_hint=relative_path,
+                write_index=True,
+                fidelity=pull_fidelity,
+            )
+            execution_results.append(
+                {
+                    "ok": bool(pull_result.get("ok")),
+                    "mode": "pull",
+                    "relative_path": relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                    "backup": local_backup,
+                    "execute": pull_result,
+                }
+            )
+            if pull_result.get("ok"):
+                pulled_relative_paths.append(relative_path)
+                continue
+
+            failed_count += 1
+            if not continue_on_error:
+                break
+            continue
+
+        if action_mode == "adopt_remote_pull":
+            candidate = action.get("candidate") if isinstance(action.get("candidate"), dict) else {}
+            target_relative_path = str(candidate.get("relative_path") or relative_path)
+            target_path = (resolved_root / target_relative_path).resolve()
+            pull_result = execute_pull_markdown(
+                document_id=doc_token,
+                tenant_access_token=tenant_access_token,
+                base_url=base_url,
+                timeout=timeout,
+                output_path=str(target_path),
+                root=resolved_root,
+                index_path=str(effective_index_path),
+                overwrite=False,
+                sync_direction="bidirectional",
+                title_override=title,
+                relative_path_hint=target_relative_path,
+                write_index=True,
+                fidelity=pull_fidelity,
+            )
+            execution_results.append(
+                {
+                    "ok": bool(pull_result.get("ok")),
+                    "mode": "adopt_remote_pull",
+                    "relative_path": target_relative_path,
+                    "doc_token": doc_token,
+                    "title": title,
+                    "candidate": candidate,
+                    "backup": None,
+                    "execute": pull_result,
+                }
+            )
+            if pull_result.get("ok"):
+                pulled_relative_paths.append(target_relative_path)
+                adopted_relative_paths.append(target_relative_path)
+                continue
+
+            failed_count += 1
+            if not continue_on_error:
+                break
+            continue
+
+        failed_count += 1
+        execution_results.append(
+            {
+                "ok": False,
+                "mode": action_mode or "unknown",
+                "relative_path": relative_path,
+                "doc_token": doc_token,
+                "title": title,
+                "backup": None,
+                "execute": None,
+                "error": "Unsupported bidirectional action mode.",
+            }
+        )
+        if not continue_on_error:
+            break
+
+    summary = dict(plan.get("summary", {}))
+    summary.update(
+        {
+            **execution_plan.get("summary", {}),
+            "attempted_action_count": len(execution_results),
+            "pushed_count": len(pushed_relative_paths),
+            "pulled_count": len(pulled_relative_paths),
+            "merged_count": len(merged_relative_paths),
+            "created_count": len(created_relative_paths),
+            "adopted_count": len(adopted_relative_paths),
+            "failed_count": failed_count,
+            "pull_fidelity": pull_fidelity,
+        }
+    )
+
+    return {
+        "ok": failed_count == 0,
+        "root": str(resolved_root),
+        "index_path": str(effective_index_path),
+        "dry_run": False,
+        "bidirectional": True,
+        "summary": summary,
+        "local_plans": plan.get("local_plans", []),
+        "remote_listing": plan.get("remote_listing", {}),
+        "remote_pull_candidates": plan.get("remote_pull_candidates", []),
+        "conflict_detection": plan.get("conflict_detection"),
+        "execution_plan": execution_plan,
+        "execution_results": execution_results,
+        "backup": {
+            "run_dir": str(backup_run_dir),
+            "plan_path": str(backup_plan_path),
+            "execution_plan_path": str(execution_plan_path),
+            "index_snapshot": index_snapshot,
+        },
+        "risks": plan.get("risks", []),
+        "notes": notes
+        + [
+            "Each protected push backs up the current remote Feishu document before replace-markdown runs.",
+            "Each protected pull backs up the current local Markdown file before pull-markdown overwrites it.",
+            "Auto-merged files are restored from the local backup if the follow-up push fails after the merged Markdown body is written locally.",
+        ],
     }
 
 
@@ -3990,7 +5841,8 @@ def execute_push_markdown(
             "write": write_result,
         }
 
-    body_hash = sha256_text(markdown_content)
+    content_hash = sha256_text(markdown_content)
+    body_hash = sha256_text(body)
     final_remote_revision_id = extract_final_document_revision_id(write_result)
     index_entry = update_index_entry(
         effective_index_path,
@@ -3998,12 +5850,14 @@ def execute_push_markdown(
         {
             "doc_token": final_doc_token,
             "title": title,
-            "content_hash": body_hash,
+            "content_hash": content_hash,
             "body_hash": body_hash,
+            "baseline_body_snapshot": encode_text_snapshot(body),
             "last_sync_at": current_timestamp_utc(),
             "sync_direction": sync_direction,
             "folder_token": str(folder_token) if folder_token else None,
             "remote_revision_id": final_remote_revision_id,
+            "remote_content_hash": "",
             "last_sync_operation": "push",
         },
     )
@@ -4019,7 +5873,7 @@ def execute_push_markdown(
         "folder_token": str(folder_token) if folder_token else None,
         "source": source_info,
         "mapping_source": mapping_source,
-        "content_hash": body_hash,
+        "content_hash": content_hash,
         "body_hash": body_hash,
         "remote_revision_id": final_remote_revision_id,
         "index_path": str(effective_index_path),
@@ -6456,6 +8310,18 @@ def command_sync_dir(args: argparse.Namespace) -> int:
     ]
     if args.prune:
         official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["delete_file"]])
+    if args.include_diff and args.diff_fidelity == "high":
+        official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["list_document_blocks"]])
+    if args.execute_bidirectional:
+        official_docs = normalize_reference_list(
+            official_docs,
+            [
+                OFFICIAL_REFERENCES["list_document_blocks"],
+                OFFICIAL_REFERENCES["convert_markdown_html"],
+                OFFICIAL_REFERENCES["create_descendant_blocks"],
+                OFFICIAL_REFERENCES["delete_block_children"],
+            ],
+        )
     request_payload = {
         "path": args.path,
         "folder_token": args.folder_token,
@@ -6467,11 +8333,20 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         "dry_run": bool(args.dry_run),
         "prune": bool(args.prune),
         "confirm_prune": bool(args.confirm_prune),
+        "execute_bidirectional": bool(args.execute_bidirectional),
+        "confirm_bidirectional": bool(args.confirm_bidirectional),
+        "pull_fidelity": args.pull_fidelity,
         "detect_conflicts": bool(args.detect_conflicts),
+        "include_diff": bool(args.include_diff),
+        "diff_fidelity": args.diff_fidelity,
+        "diff_max_lines": args.diff_max_lines,
         "backup_dir": args.backup_dir,
         "continue_on_error": bool(args.continue_on_error),
+        "allow_auto_merge": bool(args.allow_auto_merge),
+        "adopt_remote_new": bool(args.adopt_remote_new),
+        "include_create_flow": bool(args.include_create_flow),
     }
-    if not args.dry_run and not args.prune:
+    if args.prune and args.execute_bidirectional:
         print_json(
             build_command_response(
                 "sync-dir",
@@ -6480,11 +8355,63 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
-                error="sync-dir execution currently supports prune-only execution. Re-run with --dry-run for planning or add --prune --confirm-prune to execute prune.",
+                error="Choose either --prune or --execute-bidirectional for sync-dir execution, not both in the same run.",
             )
         )
         return 1
-    if not args.dry_run and args.detect_conflicts:
+    if not args.dry_run and not args.prune and not args.execute_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="sync-dir execution currently supports either --prune --confirm-prune or --execute-bidirectional --confirm-bidirectional. Re-run with --dry-run for planning when you are not ready to execute.",
+            )
+        )
+        return 1
+    if args.dry_run and args.execute_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="Use either --dry-run for planning or --execute-bidirectional for execution, not both in the same run.",
+            )
+        )
+        return 1
+    if args.include_diff and not args.detect_conflicts:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="Diff preview requires --detect-conflicts so sync-dir can inspect local vs remote drift before execution.",
+            )
+        )
+        return 1
+    if args.include_diff and not args.dry_run:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="Diff preview is available only during --dry-run planning.",
+            )
+        )
+        return 1
+    if not args.dry_run and args.detect_conflicts and not args.execute_bidirectional:
         print_json(
             build_command_response(
                 "sync-dir",
@@ -6494,6 +8421,71 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 official_docs=official_docs,
                 request=request_payload,
                 error="Conflict detection currently runs only with --dry-run. Re-run with --dry-run --detect-conflicts before any execution step.",
+            )
+        )
+        return 1
+    if args.diff_max_lines <= 0:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--diff-max-lines must be a positive integer.",
+            )
+        )
+        return 1
+    if args.confirm_bidirectional and not args.execute_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--confirm-bidirectional only applies when --execute-bidirectional is enabled.",
+            )
+        )
+        return 1
+    if (args.allow_auto_merge or args.adopt_remote_new or args.include_create_flow) and not args.execute_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--allow-auto-merge, --adopt-remote-new, and --include-create-flow only apply when --execute-bidirectional is enabled.",
+            )
+        )
+        return 1
+    if not args.dry_run and args.execute_bidirectional and not args.confirm_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="Protected bidirectional execution is destructive on both local and remote state. Re-run with --confirm-bidirectional after reviewing the dry-run plan.",
+            )
+        )
+        return 1
+    if args.pull_fidelity not in {"low", "high"}:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="tenant",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--pull-fidelity must be either low or high.",
             )
         )
         return 1
@@ -6570,6 +8562,28 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 max_pages=args.max_pages,
                 prune=args.prune,
                 detect_conflicts=args.detect_conflicts,
+                include_diff=args.include_diff,
+                diff_fidelity=args.diff_fidelity,
+                diff_max_lines=args.diff_max_lines,
+            )
+        elif args.execute_bidirectional:
+            result = execute_sync_dir_bidirectional(
+                root=Path(args.path),
+                tenant_access_token=str(token_result["tenant_access_token"]),
+                base_url=base_url,
+                timeout=args.timeout,
+                folder_token=args.folder_token,
+                index_path=args.index_path,
+                recursive=args.recursive,
+                max_depth=args.max_depth,
+                page_size=args.page_size,
+                max_pages=args.max_pages,
+                backup_dir=args.backup_dir,
+                continue_on_error=args.continue_on_error,
+                pull_fidelity=args.pull_fidelity,
+                allow_auto_merge=args.allow_auto_merge,
+                adopt_remote_new=args.adopt_remote_new,
+                include_create_flow=args.include_create_flow,
             )
         else:
             result = execute_sync_dir_prune(
@@ -7003,7 +9017,16 @@ def build_parser() -> argparse.ArgumentParser:
     sync_dir_parser.add_argument("--dry-run", action="store_true", help="Build a plan without executing remote deletes or index cleanup.")
     sync_dir_parser.add_argument("--prune", action="store_true", help="Include prune candidates in planning; with --confirm-prune and no --dry-run, execute the prune candidates.")
     sync_dir_parser.add_argument("--confirm-prune", action="store_true", help="Required safety flag before sync-dir executes remote prune deletes and index cleanup.")
+    sync_dir_parser.add_argument("--execute-bidirectional", action="store_true", help="Execute protected bidirectional sync for cleanly mapped bidirectional files after conflict detection says they are only local_ahead or remote_ahead.")
+    sync_dir_parser.add_argument("--confirm-bidirectional", action="store_true", help="Required safety flag before sync-dir overwrites local Markdown files or remote Feishu docs during protected bidirectional execution.")
+    sync_dir_parser.add_argument("--pull-fidelity", choices=("low", "high"), default="low", help="When --execute-bidirectional pulls remote changes into local Markdown, low uses raw_content and high rebuilds common block types from the block tree.")
+    sync_dir_parser.add_argument("--allow-auto-merge", action="store_true", help="With --execute-bidirectional, allow sync-dir to auto-merge non-overlapping semantic changes for local_and_remote_changed files when a stored baseline snapshot is available.")
+    sync_dir_parser.add_argument("--adopt-remote-new", action="store_true", help="With --execute-bidirectional, pull visible unmapped remote docs into the local sync root and register them as bidirectional mappings.")
+    sync_dir_parser.add_argument("--include-create-flow", action="store_true", help="With --execute-bidirectional, allow unmapped local bidirectional files to create new remote Feishu docs and write back their mappings.")
     sync_dir_parser.add_argument("--detect-conflicts", action="store_true", help="During --dry-run, inspect mapped visible docs and classify local drift, remote drift, and review-required conflicts from the last recorded sync baseline.")
+    sync_dir_parser.add_argument("--include-diff", action="store_true", help="With --dry-run --detect-conflicts, attach a semantic block diff preview plus a truncated line diff between the local Markdown body and a comparable remote export.")
+    sync_dir_parser.add_argument("--diff-fidelity", choices=("low", "high"), default="low", help="Remote export mode used for conflict diff previews. low compares against raw_content; high rebuilds common block types from the block tree before diffing.")
+    sync_dir_parser.add_argument("--diff-max-lines", type=int, default=80, help="Maximum preview lines to include per inspected file when --include-diff is enabled. Defaults to 80.")
     sync_dir_parser.add_argument("--backup-dir", help="Optional backup root. Defaults to <sync-root>/.feishu-sync-backups.")
     sync_dir_parser.add_argument("--continue-on-error", action="store_true", help="Continue processing later prune candidates after a backup or delete failure.")
     sync_dir_parser.add_argument("--no-recursive", dest="recursive", action="store_false", help="Only inspect the top-level remote folder instead of walking nested folders.")

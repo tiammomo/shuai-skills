@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import re
 import socket
@@ -17,6 +18,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "feishu_doc_sync.py"
@@ -53,6 +55,56 @@ def extract_json_object(text: str) -> dict:
 
 def sha256_text(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def encode_text_snapshot(text: str) -> dict:
+    raw_bytes = text.encode("utf-8")
+    return {
+        "encoding": "zlib+base64:utf-8",
+        "data": base64.b64encode(zlib.compress(raw_bytes, level=9)).decode("ascii"),
+        "length": len(raw_bytes),
+        "content_hash": sha256_text(text),
+    }
+
+
+def make_text_elements(text: str) -> list[dict]:
+    return [
+        {
+            "text_run": {
+                "content": text,
+                "text_element_style": {},
+            }
+        }
+    ]
+
+
+def make_mock_document_blocks(document_id: str, title: str, paragraphs: list[str]) -> list[dict]:
+    children: list[str] = []
+    blocks: list[dict] = [
+        {
+            "block_id": document_id,
+            "block_type": 1,
+            "children": children,
+            "page": {
+                "elements": make_text_elements(title),
+            },
+        }
+    ]
+    for index, paragraph in enumerate(paragraphs, start=1):
+        block_id = f"blk-{document_id}-{index}"
+        children.append(block_id)
+        blocks.append(
+            {
+                "block_id": block_id,
+                "block_type": 2,
+                "parent_id": document_id,
+                "children": [],
+                "text": {
+                    "elements": make_text_elements(paragraph),
+                },
+            }
+        )
+    return blocks
 
 
 class MockFeishuHandler(BaseHTTPRequestHandler):
@@ -1460,6 +1512,7 @@ def main() -> int:
                                 "title": "Review Conflict",
                                 "sync_direction": "bidirectional",
                                 "body_hash": sha256_text("\n# Review Conflict\n\nPrevious local text."),
+                                "baseline_body_snapshot": encode_text_snapshot("\n# Review Conflict\n\nShared baseline text.\n"),
                                 "remote_revision_id": 0,
                                 "remote_content_hash": sha256_text("much older remote snapshot"),
                                 "last_sync_at": "2026-03-14T12:10:00Z",
@@ -1483,6 +1536,11 @@ def main() -> int:
                     base_url,
                     "--dry-run",
                     "--detect-conflicts",
+                    "--include-diff",
+                    "--diff-fidelity",
+                    "high",
+                    "--diff-max-lines",
+                    "20",
                 )
             )
             if not conflict_detect_result.get("ok"):
@@ -1496,9 +1554,18 @@ def main() -> int:
             action_counts = conflict_detection.get("recommended_action_counts", {})
             if action_counts.get("pull_candidate") != 1 or action_counts.get("push_candidate") != 1 or action_counts.get("manual_conflict_review") != 1:
                 raise RuntimeError(f"Unexpected recommended actions for sync-dir conflict detection: {conflict_detect_result}")
+            diff_summary = conflict_detection.get("diff", {})
+            if not diff_summary.get("enabled"):
+                raise RuntimeError(f"sync-dir conflict detection did not report diff preview as enabled: {conflict_detect_result}")
+            if diff_summary.get("generated_count") != 3 or diff_summary.get("failed_count") != 0:
+                raise RuntimeError(f"Unexpected diff preview counts for sync-dir conflict detection: {conflict_detect_result}")
             conflict_summary = conflict_detect_result.get("result", {}).get("summary", {})
             if conflict_summary.get("conflict_review_count") != 1:
                 raise RuntimeError(f"Unexpected sync-dir conflict review count: {conflict_detect_result}")
+            if conflict_summary.get("conflict_diff_preview_count") != 3:
+                raise RuntimeError(f"Unexpected sync-dir diff preview count: {conflict_detect_result}")
+            if conflict_summary.get("merge_suggestion_count") != 1 or conflict_summary.get("merge_auto_ready_count") != 0:
+                raise RuntimeError(f"Unexpected sync-dir merge suggestion counts: {conflict_detect_result}")
             conflict_results = {
                 entry.get("relative_path"): entry
                 for entry in conflict_detection.get("results", [])
@@ -1510,6 +1577,435 @@ def main() -> int:
                 raise RuntimeError(f"push-local.md did not classify as a push candidate: {conflict_detect_result}")
             if conflict_results.get("review-conflict.md", {}).get("comparison", {}).get("recommended_action") != "manual_conflict_review":
                 raise RuntimeError(f"review-conflict.md did not classify as a manual conflict review case: {conflict_detect_result}")
+            pull_remote_diff = conflict_results.get("pull-remote.md", {}).get("diff", {})
+            if pull_remote_diff.get("format") != "semantic_blocks":
+                raise RuntimeError(f"pull-remote.md did not expose semantic block diff output: {conflict_detect_result}")
+            if "heading-2: Architecture" not in str(pull_remote_diff.get("preview") or ""):
+                raise RuntimeError(f"pull-remote.md semantic diff preview did not include expected block structure: {conflict_detect_result}")
+            review_diff = conflict_results.get("review-conflict.md", {}).get("diff", {})
+            if not review_diff.get("ok") or not review_diff.get("has_changes"):
+                raise RuntimeError(f"review-conflict.md did not include a usable diff preview: {conflict_detect_result}")
+            preview_text = str(review_diff.get("line_preview", {}).get("preview") or "")
+            if "--- local:review-conflict.md" not in preview_text or "+++ feishu:dox-archive-note" not in preview_text:
+                raise RuntimeError(f"review-conflict.md diff preview headers are missing: {conflict_detect_result}")
+            if "Both sides changed." not in preview_text or "Archived nested content." not in preview_text:
+                raise RuntimeError(f"review-conflict.md diff preview did not include expected changed content: {conflict_detect_result}")
+            review_merge = conflict_results.get("review-conflict.md", {}).get("merge_suggestion", {})
+            if not review_merge.get("ok") or review_merge.get("auto_merge_ready"):
+                raise RuntimeError(f"review-conflict.md did not expose a blocked semantic merge suggestion: {conflict_detect_result}")
+            if not review_merge.get("baseline_available") or review_merge.get("summary", {}).get("conflict_count", 0) < 1:
+                raise RuntimeError(f"review-conflict.md merge suggestion did not preserve the expected baseline/conflict metadata: {conflict_detect_result}")
+
+            MockFeishuHandler.documents["dox-bidir-local"] = {
+                "title": "Bidir Local",
+                "revision_id": 2,
+                "children": [],
+                "url": "https://example.test/docx/dox-bidir-local",
+                "raw_content": "Bidir Local\nRemote snapshot before push.\n",
+            }
+            MockFeishuHandler.documents["dox-bidir-remote"] = {
+                "title": "Bidir Remote",
+                "revision_id": 5,
+                "children": [],
+                "url": "https://example.test/docx/dox-bidir-remote",
+                "raw_content": "Bidir Remote\nRemote revision that should be pulled.\n",
+            }
+            MockFeishuHandler.documents["dox-bidir-conflict"] = {
+                "title": "Bidir Conflict",
+                "revision_id": 7,
+                "children": [],
+                "url": "https://example.test/docx/dox-bidir-conflict",
+                "raw_content": "Bidir Conflict\nRemote conflict text.\n",
+            }
+            MockFeishuHandler._register_drive_child(
+                "fld-root-mock",
+                {
+                    "name": "Bidir Local",
+                    "type": "docx",
+                    "token": "dox-bidir-local",
+                    "parent_token": "fld-root-mock",
+                    "url": "https://example.test/docx/dox-bidir-local",
+                    "created_time": "1773500012",
+                    "modified_time": "1773500013",
+                },
+            )
+            MockFeishuHandler._register_drive_child(
+                "fld-root-mock",
+                {
+                    "name": "Bidir Remote",
+                    "type": "docx",
+                    "token": "dox-bidir-remote",
+                    "parent_token": "fld-root-mock",
+                    "url": "https://example.test/docx/dox-bidir-remote",
+                    "created_time": "1773500014",
+                    "modified_time": "1773500015",
+                },
+            )
+            MockFeishuHandler._register_drive_child(
+                "fld-root-mock",
+                {
+                    "name": "Bidir Conflict",
+                    "type": "docx",
+                    "token": "dox-bidir-conflict",
+                    "parent_token": "fld-root-mock",
+                    "url": "https://example.test/docx/dox-bidir-conflict",
+                    "created_time": "1773500016",
+                    "modified_time": "1773500017",
+                },
+            )
+
+            blocked_bidir_root = Path(tmp_dir) / "blocked-bidir-root"
+            blocked_bidir_root.mkdir(parents=True, exist_ok=True)
+            (blocked_bidir_root / "needs-review.md").write_text(
+                "---\n"
+                "title: Bidir Conflict\n"
+                "feishu_doc_token: dox-bidir-conflict\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Bidir Conflict\n"
+                "\n"
+                "Local conflict text.\n",
+                encoding="utf-8",
+            )
+            (blocked_bidir_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "needs-review.md",
+                                "doc_token": "dox-bidir-conflict",
+                                "title": "Bidir Conflict",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# Bidir Conflict\n\nPrevious local conflict text."),
+                                "remote_revision_id": 6,
+                                "remote_content_hash": sha256_text("older remote conflict snapshot"),
+                                "last_sync_at": "2026-03-14T12:20:00Z",
+                            }
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            blocked_execution = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "sync-dir",
+                    str(blocked_bidir_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if blocked_execution.returncode == 0:
+                raise RuntimeError(f"Protected bidirectional execution should have been blocked: {blocked_execution.stdout}")
+            blocked_payload = extract_json_object(blocked_execution.stdout)
+            if "blocked" not in str(blocked_payload.get("error") or ""):
+                raise RuntimeError(f"Blocked bidirectional execution did not explain the protection failure: {blocked_payload}")
+            blocked_plan_summary = blocked_payload.get("result", {}).get("execution_plan", {}).get("summary", {})
+            if blocked_plan_summary.get("blocked_count") != 1 or blocked_plan_summary.get("actionable_count") != 0:
+                raise RuntimeError(f"Blocked bidirectional execution did not report the expected protection counts: {blocked_payload}")
+
+            clean_bidir_root = Path(tmp_dir) / "clean-bidir-root"
+            clean_bidir_root.mkdir(parents=True, exist_ok=True)
+            (clean_bidir_root / "push-clean.md").write_text(
+                "---\n"
+                "title: Bidir Local\n"
+                "feishu_doc_token: dox-bidir-local\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Bidir Local\n"
+                "\n"
+                "Local version ready to push.\n",
+                encoding="utf-8",
+            )
+            (clean_bidir_root / "pull-clean.md").write_text(
+                "---\n"
+                "title: Bidir Remote\n"
+                "feishu_doc_token: dox-bidir-remote\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Bidir Remote\n"
+                "\n"
+                "Older local copy.\n",
+                encoding="utf-8",
+            )
+            (clean_bidir_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "push-clean.md",
+                                "doc_token": "dox-bidir-local",
+                                "title": "Bidir Local",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# Bidir Local\n\nPrevious local push text."),
+                                "remote_revision_id": 2,
+                                "remote_content_hash": sha256_text(str(MockFeishuHandler.documents["dox-bidir-local"]["raw_content"])),
+                                "last_sync_at": "2026-03-14T12:25:00Z",
+                            },
+                            {
+                                "relative_path": "pull-clean.md",
+                                "doc_token": "dox-bidir-remote",
+                                "title": "Bidir Remote",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# Bidir Remote\n\nOlder local copy."),
+                                "remote_revision_id": 4,
+                                "remote_content_hash": sha256_text("older remote pull snapshot"),
+                                "last_sync_at": "2026-03-14T12:30:00Z",
+                            },
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            bidirectional_execute_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(clean_bidir_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--pull-fidelity",
+                    "low",
+                )
+            )
+            if not bidirectional_execute_result.get("ok"):
+                raise RuntimeError(f"Unexpected protected bidirectional execution result: {bidirectional_execute_result}")
+            bidirectional_payload = bidirectional_execute_result.get("result", {})
+            bidirectional_summary = bidirectional_payload.get("summary", {})
+            if bidirectional_summary.get("pushed_count") != 1 or bidirectional_summary.get("pulled_count") != 1:
+                raise RuntimeError(f"Protected bidirectional execution did not run one push and one pull: {bidirectional_execute_result}")
+            if bidirectional_summary.get("failed_count") != 0:
+                raise RuntimeError(f"Protected bidirectional execution reported unexpected failures: {bidirectional_execute_result}")
+            bidirectional_plan_summary = bidirectional_payload.get("execution_plan", {}).get("summary", {})
+            if bidirectional_plan_summary.get("blocked_count") != 0 or bidirectional_plan_summary.get("actionable_count") != 2:
+                raise RuntimeError(f"Protected bidirectional execution did not report the expected action plan: {bidirectional_execute_result}")
+            bidirectional_backup_dir = Path(bidirectional_payload.get("backup", {}).get("run_dir", ""))
+            if not bidirectional_backup_dir.is_dir():
+                raise RuntimeError(f"Protected bidirectional execution did not create a backup directory: {bidirectional_execute_result}")
+            if not (bidirectional_backup_dir / "bidirectional-execution-plan.json").is_file():
+                raise RuntimeError(f"Protected bidirectional execution did not write the execution plan snapshot: {bidirectional_execute_result}")
+            if not any(path.name == "document.md" for path in (bidirectional_backup_dir / "remote-before-push").rglob("document.md")):
+                raise RuntimeError(f"Protected bidirectional execution did not back up the remote push target: {bidirectional_execute_result}")
+            if not (bidirectional_backup_dir / "local-files" / "pull-clean.md").is_file():
+                raise RuntimeError(f"Protected bidirectional execution did not back up the local pull target: {bidirectional_execute_result}")
+            pulled_text = (clean_bidir_root / "pull-clean.md").read_text(encoding="utf-8")
+            if "Remote revision that should be pulled." not in pulled_text:
+                raise RuntimeError(f"Protected bidirectional execution did not pull the remote content into the local file: {bidirectional_execute_result}")
+            if int(MockFeishuHandler.documents["dox-bidir-local"]["revision_id"]) <= 2:
+                raise RuntimeError("Protected bidirectional execution did not update the remote push target revision")
+            clean_index_payload = json.loads((clean_bidir_root / "feishu-index.json").read_text(encoding="utf-8"))
+            clean_entries = {
+                entry.get("relative_path"): entry
+                for entry in clean_index_payload.get("files", [])
+                if isinstance(entry, dict)
+            }
+            if clean_entries.get("push-clean.md", {}).get("last_sync_operation") != "push":
+                raise RuntimeError(f"Protected bidirectional execution did not mark the push result in the index: {clean_index_payload}")
+            if clean_entries.get("pull-clean.md", {}).get("last_sync_operation") != "pull":
+                raise RuntimeError(f"Protected bidirectional execution did not mark the pull result in the index: {clean_index_payload}")
+            if clean_entries.get("pull-clean.md", {}).get("last_pull_fidelity") != "raw_content":
+                raise RuntimeError(f"Protected bidirectional execution did not persist pull fidelity in the index: {clean_index_payload}")
+
+            MockFeishuHandler.drive_files["fld-bidir-suite"] = []
+            MockFeishuHandler.documents["dox-bidir-merge"] = {
+                "title": "Bidir Merge",
+                "revision_id": 8,
+                "children": ["blk-dox-bidir-merge-1", "blk-dox-bidir-merge-2", "blk-dox-bidir-merge-3"],
+                "url": "https://example.test/docx/dox-bidir-merge",
+                "raw_content": "Bidir Merge\nIntro paragraph.\n\nShared ending.\n\nRemote appendix.\n",
+                "blocks": make_mock_document_blocks(
+                    "dox-bidir-merge",
+                    "Bidir Merge",
+                    ["Intro paragraph.", "Shared ending.", "Remote appendix."],
+                ),
+            }
+            MockFeishuHandler.documents["dox-bidir-adopt"] = {
+                "title": "Bidir Adopt",
+                "revision_id": 3,
+                "children": ["blk-dox-bidir-adopt-1"],
+                "url": "https://example.test/docx/dox-bidir-adopt",
+                "raw_content": "Bidir Adopt\nRemote-only candidate.\n",
+                "blocks": make_mock_document_blocks(
+                    "dox-bidir-adopt",
+                    "Bidir Adopt",
+                    ["Remote-only candidate."],
+                ),
+            }
+            MockFeishuHandler._register_drive_child(
+                "fld-bidir-suite",
+                {
+                    "name": "Bidir Merge",
+                    "type": "docx",
+                    "token": "dox-bidir-merge",
+                    "parent_token": "fld-bidir-suite",
+                    "url": "https://example.test/docx/dox-bidir-merge",
+                    "created_time": "1773500018",
+                    "modified_time": "1773500019",
+                },
+            )
+            MockFeishuHandler._register_drive_child(
+                "fld-bidir-suite",
+                {
+                    "name": "Bidir Adopt",
+                    "type": "docx",
+                    "token": "dox-bidir-adopt",
+                    "parent_token": "fld-bidir-suite",
+                    "url": "https://example.test/docx/dox-bidir-adopt",
+                    "created_time": "1773500020",
+                    "modified_time": "1773500021",
+                },
+            )
+
+            advanced_bidir_root = Path(tmp_dir) / "advanced-bidir-root"
+            advanced_bidir_root.mkdir(parents=True, exist_ok=True)
+            (advanced_bidir_root / "merge-safe.md").write_text(
+                "---\n"
+                "title: Bidir Merge\n"
+                "feishu_doc_token: dox-bidir-merge\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Bidir Merge\n"
+                "\n"
+                "Intro paragraph.\n"
+                "\n"
+                "Local checklist item.\n"
+                "\n"
+                "Shared ending.\n",
+                encoding="utf-8",
+            )
+            (advanced_bidir_root / "create-new.md").write_text(
+                "---\n"
+                "title: Create Bidir\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# Create Bidir\n"
+                "\n"
+                "Local file that should create a remote doc.\n",
+                encoding="utf-8",
+            )
+            (advanced_bidir_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "merge-safe.md",
+                                "doc_token": "dox-bidir-merge",
+                                "title": "Bidir Merge",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# Bidir Merge\n\nIntro paragraph.\n\nShared ending.\n"),
+                                "baseline_body_snapshot": encode_text_snapshot("\n# Bidir Merge\n\nIntro paragraph.\n\nShared ending.\n"),
+                                "remote_revision_id": 7,
+                                "remote_content_hash": sha256_text("older remote merge snapshot"),
+                                "last_sync_at": "2026-03-14T12:35:00Z",
+                            }
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            advanced_bidir_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(advanced_bidir_root),
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-bidir-suite",
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--allow-auto-merge",
+                    "--adopt-remote-new",
+                    "--include-create-flow",
+                    "--pull-fidelity",
+                    "high",
+                )
+            )
+            if not advanced_bidir_result.get("ok"):
+                raise RuntimeError(f"Unexpected advanced protected bidirectional execution result: {advanced_bidir_result}")
+            advanced_payload = advanced_bidir_result.get("result", {})
+            advanced_summary = advanced_payload.get("summary", {})
+            if (
+                advanced_summary.get("pushed_count") != 2
+                or advanced_summary.get("pulled_count") != 1
+                or advanced_summary.get("merged_count") != 1
+                or advanced_summary.get("created_count") != 1
+                or advanced_summary.get("adopted_count") != 1
+            ):
+                raise RuntimeError(f"Advanced bidirectional execution did not report the expected action counts: {advanced_bidir_result}")
+            advanced_plan_summary = advanced_payload.get("execution_plan", {}).get("summary", {})
+            if advanced_plan_summary.get("blocked_count") != 0 or advanced_plan_summary.get("actionable_count") != 3:
+                raise RuntimeError(f"Advanced bidirectional execution did not report the expected protected action plan: {advanced_bidir_result}")
+            advanced_backup_dir = Path(advanced_payload.get("backup", {}).get("run_dir", ""))
+            if not advanced_backup_dir.is_dir():
+                raise RuntimeError(f"Advanced bidirectional execution did not create a backup directory: {advanced_bidir_result}")
+            if not (advanced_backup_dir / "local-files" / "merge-safe.md").is_file():
+                raise RuntimeError(f"Advanced bidirectional execution did not back up the local merge file: {advanced_bidir_result}")
+            if not any(path.name == "document.md" for path in (advanced_backup_dir / "remote-before-merge-push").rglob("document.md")):
+                raise RuntimeError(f"Advanced bidirectional execution did not back up the remote merge target: {advanced_bidir_result}")
+            merged_text = (advanced_bidir_root / "merge-safe.md").read_text(encoding="utf-8")
+            if "Local checklist item." not in merged_text or "Remote appendix." not in merged_text:
+                raise RuntimeError(f"Advanced bidirectional execution did not persist the merged Markdown body locally: {advanced_bidir_result}")
+            adopted_path = advanced_bidir_root / "Bidir-Adopt.md"
+            if not adopted_path.is_file():
+                raise RuntimeError(f"Advanced bidirectional execution did not create the adopted remote Markdown file: {advanced_bidir_result}")
+            adopted_text = adopted_path.read_text(encoding="utf-8")
+            if "feishu_sync_direction: bidirectional" not in adopted_text or "Remote-only candidate." not in adopted_text:
+                raise RuntimeError(f"Advanced bidirectional execution did not preserve the adopted remote doc content or mapping metadata: {advanced_bidir_result}")
+            advanced_index_payload = json.loads((advanced_bidir_root / "feishu-index.json").read_text(encoding="utf-8"))
+            advanced_entries = {
+                entry.get("relative_path"): entry
+                for entry in advanced_index_payload.get("files", [])
+                if isinstance(entry, dict)
+            }
+            created_entry = advanced_entries.get("create-new.md", {})
+            if not str(created_entry.get("doc_token") or "").startswith("dox-created-"):
+                raise RuntimeError(f"Advanced bidirectional execution did not persist the newly created remote doc token: {advanced_index_payload}")
+            if created_entry.get("last_sync_operation") != "push":
+                raise RuntimeError(f"Advanced bidirectional execution did not mark the create flow as a push in the index: {advanced_index_payload}")
+            adopted_entry = advanced_entries.get("Bidir-Adopt.md", {})
+            if adopted_entry.get("doc_token") != "dox-bidir-adopt" or adopted_entry.get("sync_direction") != "bidirectional":
+                raise RuntimeError(f"Advanced bidirectional execution did not persist the adopted remote mapping in the index: {advanced_index_payload}")
+            merged_entry = advanced_entries.get("merge-safe.md", {})
+            if merged_entry.get("last_sync_operation") != "push":
+                raise RuntimeError(f"Advanced bidirectional execution did not persist the merged push result in the index: {advanced_index_payload}")
+            if int(MockFeishuHandler.documents["dox-bidir-merge"]["revision_id"]) <= 8:
+                raise RuntimeError("Advanced bidirectional execution did not update the remote merge target revision")
+            if created_entry.get("doc_token") not in MockFeishuHandler.documents:
+                raise RuntimeError(f"Advanced bidirectional execution created an index entry without a backing mock document: {advanced_index_payload}")
 
             sync_dir_execute_result = json.loads(
                 run_cli(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import base64
 import json
+import os
 import re
 import socket
 import subprocess
@@ -949,6 +950,25 @@ def main() -> int:
             if not validate_result.get("ok"):
                 raise RuntimeError(f"Unexpected validate-tenant result: {validate_result}")
 
+            user_env = os.environ.copy()
+            user_env["FEISHU_USER_ACCESS_TOKEN"] = "u-mock-user-access-token-1234567890"
+            user_env.pop("FEISHU_APP_ID", None)
+            user_env.pop("FEISHU_APP_SECRET", None)
+            user_env.pop("FEISHU_TENANT_ACCESS_TOKEN", None)
+
+            validate_user_result = json.loads(
+                run_cli(
+                    "validate-user",
+                    "--base-url",
+                    base_url,
+                    "--document-id",
+                    "dox-mock",
+                    env=user_env,
+                )
+            )
+            if not validate_user_result.get("ok") or validate_user_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected validate-user result: {validate_user_result}")
+
             create_result = json.loads(
                 run_cli(
                     "create-document",
@@ -1034,6 +1054,70 @@ def main() -> int:
             if replace_payload.get("append", {}).get("write_result", {}).get("child_count") != 2:
                 raise RuntimeError(f"Unexpected replace-markdown append result: {replace_result}")
 
+            user_append_result = json.loads(
+                run_cli(
+                    "append-markdown",
+                    "dox-mock",
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                    "--content",
+                    "User mode append paragraph.\n",
+                    env=user_env,
+                )
+            )
+            if not user_append_result.get("ok") or user_append_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode append-markdown result: {user_append_result}")
+
+            blocked_user_replace = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "replace-markdown",
+                    "dox-mock",
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-replace",
+                    "--content",
+                    "# User Replace\n\nBlocked until confirmed.\n",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_replace.returncode == 0:
+                raise RuntimeError(f"user-mode replace-markdown should require --confirm-user-write: {blocked_user_replace.stdout}")
+            blocked_user_replace_payload = extract_json_object(blocked_user_replace.stdout)
+            if "--confirm-user-write" not in str(blocked_user_replace_payload.get("error") or ""):
+                raise RuntimeError(f"user-mode replace-markdown did not explain the protection failure: {blocked_user_replace_payload}")
+
+            user_replace_result = json.loads(
+                run_cli(
+                    "replace-markdown",
+                    "dox-mock",
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-replace",
+                    "--confirm-user-write",
+                    "--content",
+                    "# User Replace\n\nConfirmed replace.\n",
+                    env=user_env,
+                )
+            )
+            if not user_replace_result.get("ok") or user_replace_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode replace-markdown result: {user_replace_result}")
+            user_replace_payload = user_replace_result.get("result", {})
+            if user_replace_payload.get("delete", {}).get("ok") is not True:
+                raise RuntimeError(f"user-mode replace-markdown did not delete the previous root children: {user_replace_result}")
+
             push_file_root = Path(tmp_dir) / "push-file"
             push_file_root.mkdir(parents=True, exist_ok=True)
             push_file = push_file_root / "create.md"
@@ -1074,6 +1158,103 @@ def main() -> int:
                 raise RuntimeError(f"push-markdown index entry is missing doc_token: {push_file_index_payload}")
             if not push_file_index_payload["files"][0].get("body_hash") or not push_file_index_payload["files"][0].get("remote_revision_id"):
                 raise RuntimeError(f"push-markdown index entry is missing sync baseline fields: {push_file_index_payload}")
+
+            user_push_root = Path(tmp_dir) / "push-file-user"
+            user_push_root.mkdir(parents=True, exist_ok=True)
+            user_push_file = user_push_root / "mapped.md"
+            user_push_file.write_text(
+                "---\n"
+                "title: User Push Doc\n"
+                "feishu_doc_token: dox-mock\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# User Push Doc\n"
+                "\n"
+                "Updated by user push-markdown.\n",
+                encoding="utf-8",
+            )
+            user_push_result = json.loads(
+                run_cli(
+                    "push-markdown",
+                    str(user_push_file),
+                    "--root",
+                    str(user_push_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                    "--confirm-replace",
+                    env=user_env,
+                )
+            )
+            if not user_push_result.get("ok") or user_push_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode push-markdown result: {user_push_result}")
+            user_push_index_payload = json.loads((user_push_root / "feishu-index.json").read_text(encoding="utf-8"))
+            if user_push_index_payload.get("files", [{}])[0].get("doc_token") != "dox-mock":
+                raise RuntimeError(f"user-mode push-markdown did not persist the mapped doc token: {user_push_index_payload}")
+
+            blocked_user_create_file = user_push_root / "blocked-create.md"
+            blocked_user_create_file.write_text("# Blocked Create\n\nNo remote mapping yet.\n", encoding="utf-8")
+            blocked_user_create = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "push-markdown",
+                    str(blocked_user_create_file),
+                    "--root",
+                    str(user_push_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_create.returncode == 0:
+                raise RuntimeError(f"user-mode push-markdown should block create flow by default: {blocked_user_create.stdout}")
+            blocked_user_create_payload = extract_json_object(blocked_user_create.stdout)
+            if "--allow-user-create" not in str(blocked_user_create_payload.get("error") or ""):
+                raise RuntimeError(f"user-mode push-markdown did not explain the protected create guardrail: {blocked_user_create_payload}")
+
+            user_create_file = user_push_root / "allowed-create.md"
+            user_create_file.write_text(
+                "---\n"
+                "title: User Created Doc\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# User Created Doc\n"
+                "\n"
+                "Created through protected user push.\n",
+                encoding="utf-8",
+            )
+            user_create_result = json.loads(
+                run_cli(
+                    "push-markdown",
+                    str(user_create_file),
+                    "--root",
+                    str(user_push_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                    "--allow-user-create",
+                    env=user_env,
+                )
+            )
+            if not user_create_result.get("ok") or user_create_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode create push-markdown result: {user_create_result}")
+            created_doc_token = user_create_result.get("result", {}).get("index_entry", {}).get("doc_token")
+            if not str(created_doc_token or "").startswith("dox-created-"):
+                raise RuntimeError(f"user-mode push-markdown create flow did not persist a created doc token: {user_create_result}")
 
             push_dir_root = Path(tmp_dir) / "push-dir"
             push_dir_root.mkdir(parents=True, exist_ok=True)
@@ -1161,6 +1342,144 @@ def main() -> int:
             if not mirrored_entry or not str(mirrored_entry.get("folder_token") or "").startswith("fld-created-"):
                 raise RuntimeError(f"Mirrored push-dir did not persist the derived folder token: {mirror_push_index_payload}")
 
+            MockFeishuHandler.documents["dox-user-dir-mapped"] = {
+                "title": "User Dir Mapped",
+                "revision_id": 2,
+                "children": [],
+                "url": "https://example.test/docx/dox-user-dir-mapped",
+                "raw_content": "User Dir Mapped\nRemote body before the user directory update.\n",
+            }
+
+            user_push_dir_root = Path(tmp_dir) / "user-push-dir"
+            user_push_dir_root.mkdir(parents=True, exist_ok=True)
+            (user_push_dir_root / "mapped.md").write_text(
+                "---\n"
+                "title: User Dir Mapped\n"
+                "feishu_doc_token: dox-user-dir-mapped\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# User Dir Mapped\n\nUpdated from user dir.\n",
+                encoding="utf-8",
+            )
+            blocked_user_push_dir = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "push-dir",
+                    str(user_push_dir_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-replace",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_push_dir.returncode == 0:
+                raise RuntimeError(f"user-mode push-dir should require --confirm-user-write: {blocked_user_push_dir.stdout}")
+            blocked_user_push_dir_payload = extract_json_object(blocked_user_push_dir.stdout)
+            if "--confirm-user-write" not in str(blocked_user_push_dir_payload.get("error") or ""):
+                raise RuntimeError(f"user-mode push-dir did not explain the write protection failure: {blocked_user_push_dir_payload}")
+
+            user_push_dir_result = json.loads(
+                run_cli(
+                    "push-dir",
+                    str(user_push_dir_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                    "--confirm-replace",
+                    env=user_env,
+                )
+            )
+            if not user_push_dir_result.get("ok") or user_push_dir_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode push-dir mapped update result: {user_push_dir_result}")
+            if user_push_dir_result.get("result", {}).get("pushed_count") != 1:
+                raise RuntimeError(f"user-mode push-dir mapped update did not push one file: {user_push_dir_result}")
+            user_push_dir_index_payload = json.loads((user_push_dir_root / "feishu-index.json").read_text(encoding="utf-8"))
+            user_push_dir_entry = user_push_dir_index_payload.get("files", [{}])[0]
+            if user_push_dir_entry.get("doc_token") != "dox-user-dir-mapped":
+                raise RuntimeError(f"user-mode push-dir mapped update did not preserve the mapped doc token: {user_push_dir_index_payload}")
+
+            blocked_user_create_dir_root = Path(tmp_dir) / "user-push-dir-blocked"
+            (blocked_user_create_dir_root / "Guides" / "API").mkdir(parents=True, exist_ok=True)
+            (blocked_user_create_dir_root / "Guides" / "API" / "intro.md").write_text(
+                "---\n"
+                "title: User Intro Guide\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# User Intro Guide\n\nShould stay blocked without explicit create opt-in.\n",
+                encoding="utf-8",
+            )
+            created_folder_count_before = sum(1 for token in MockFeishuHandler.drive_files if str(token).startswith("fld-created-"))
+            blocked_user_create_dir = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "push-dir",
+                    str(blocked_user_create_dir_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-root-mock",
+                    "--mirror-remote-folders",
+                    "--confirm-user-write",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_create_dir.returncode == 0:
+                raise RuntimeError(f"user-mode push-dir should block create flow by default: {blocked_user_create_dir.stdout}")
+            blocked_user_create_dir_payload = extract_json_object(blocked_user_create_dir.stdout)
+            if "--allow-user-create" not in str(blocked_user_create_dir_payload.get("result", {}).get("results", [{}])[0].get("error") or ""):
+                raise RuntimeError(f"user-mode push-dir did not explain the protected create flow: {blocked_user_create_dir_payload}")
+            created_folder_count_after = sum(1 for token in MockFeishuHandler.drive_files if str(token).startswith("fld-created-"))
+            if created_folder_count_after != created_folder_count_before:
+                raise RuntimeError("user-mode push-dir created remote folders before create flow was explicitly allowed")
+
+            user_create_dir_root = Path(tmp_dir) / "user-push-dir-create"
+            user_create_dir_root.mkdir(parents=True, exist_ok=True)
+            (user_create_dir_root / "create.md").write_text(
+                "---\n"
+                "title: User Dir Create\n"
+                "feishu_sync_direction: push\n"
+                "---\n"
+                "\n"
+                "# User Dir Create\n\nCreate this doc through user-mode push-dir.\n",
+                encoding="utf-8",
+            )
+            user_create_dir_result = json.loads(
+                run_cli(
+                    "push-dir",
+                    str(user_create_dir_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--confirm-user-write",
+                    "--allow-user-create",
+                    env=user_env,
+                )
+            )
+            if not user_create_dir_result.get("ok") or user_create_dir_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode push-dir create result: {user_create_dir_result}")
+            user_create_dir_entry = user_create_dir_result.get("result", {}).get("results", [{}])[0].get("index_entry", {})
+            if not str(user_create_dir_entry.get("doc_token") or "").startswith("dox-created-"):
+                raise RuntimeError(f"user-mode push-dir create flow did not persist a created doc token: {user_create_dir_result}")
+
             get_result = json.loads(
                 run_cli(
                     "get-document",
@@ -1175,6 +1494,21 @@ def main() -> int:
             )
             if not get_result.get("ok"):
                 raise RuntimeError(f"Unexpected get-document result: {get_result}")
+
+            user_get_result = json.loads(
+                run_cli(
+                    "get-document",
+                    "dox-mock",
+                    "--auth-mode",
+                    "user",
+                    "--user-access-token",
+                    "u-cli-user-access-token-1234567890",
+                    "--base-url",
+                    base_url,
+                )
+            )
+            if not user_get_result.get("ok") or user_get_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode get-document result: {user_get_result}")
 
             raw_content_result = json.loads(
                 run_cli(
@@ -1207,6 +1541,21 @@ def main() -> int:
             )
             if not root_list_result.get("ok") or root_list_result.get("result", {}).get("file_count") != 4:
                 raise RuntimeError(f"Unexpected list-root-files result: {root_list_result}")
+
+            user_root_list_result = json.loads(
+                run_cli(
+                    "list-root-files",
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    env=user_env,
+                )
+            )
+            if not user_root_list_result.get("ok") or user_root_list_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode list-root-files result: {user_root_list_result}")
+            if user_root_list_result.get("result", {}).get("file_count") != 4:
+                raise RuntimeError(f"Unexpected user-mode list-root-files count: {user_root_list_result}")
 
             folder_list_result = json.loads(
                 run_cli(
@@ -1302,6 +1651,30 @@ def main() -> int:
             if high_pull_index_payload.get("files", [{}])[0].get("last_pull_fidelity") != "blocks":
                 raise RuntimeError(f"High-fidelity pull-markdown did not persist block fidelity into the index: {high_pull_index_payload}")
 
+            pull_markdown_user_root = Path(tmp_dir) / "pull-root-user"
+            pull_markdown_user_result = json.loads(
+                run_cli(
+                    "pull-markdown",
+                    "dox-root-b",
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--root",
+                    str(pull_markdown_user_root),
+                    "--relative-path",
+                    "imports/user-root-b.md",
+                    env=user_env,
+                )
+            )
+            if not pull_markdown_user_result.get("ok") or pull_markdown_user_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode pull-markdown result: {pull_markdown_user_result}")
+            user_pulled_file = pull_markdown_user_root / "imports" / "user-root-b.md"
+            if not user_pulled_file.is_file():
+                raise RuntimeError("user-mode pull-markdown did not create the expected local Markdown file")
+            if "Root B content." not in user_pulled_file.read_text(encoding="utf-8"):
+                raise RuntimeError(f"Unexpected user-mode pull-markdown file content: {user_pulled_file.read_text(encoding='utf-8')}")
+
             pull_dir_root = Path(tmp_dir) / "pull-dir-root"
             pull_dir_result = json.loads(
                 run_cli(
@@ -1353,6 +1726,23 @@ def main() -> int:
             high_dir_file = pull_dir_high_root / "Mock-Root-Doc-A.md"
             if "feishu_pull_fidelity: blocks" not in high_dir_file.read_text(encoding="utf-8"):
                 raise RuntimeError("pull-dir --fidelity high did not persist block-export front matter")
+
+            pull_dir_user_root = Path(tmp_dir) / "pull-dir-root-user"
+            pull_dir_user_result = json.loads(
+                run_cli(
+                    "pull-dir",
+                    str(pull_dir_user_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    env=user_env,
+                )
+            )
+            if not pull_dir_user_result.get("ok") or pull_dir_user_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode pull-dir result: {pull_dir_user_result}")
+            if pull_dir_user_result.get("result", {}).get("pulled_count") != 5:
+                raise RuntimeError(f"Unexpected user-mode pull-dir pulled_count: {pull_dir_user_result}")
 
             media_file = Path(tmp_dir) / "diagram.png"
             media_file.write_bytes(b"\x89PNG\r\n\x1a\nmock-image-data")
@@ -1439,6 +1829,250 @@ def main() -> int:
                 raise RuntimeError(f"Unexpected sync-dir prune candidate count: {sync_dir_result}")
             if sync_summary.get("local_action_counts", {}).get("update_doc") != 1:
                 raise RuntimeError(f"Unexpected sync-dir local action counts: {sync_dir_result}")
+
+            MockFeishuHandler.drive_files["fld-user-bidir-suite"] = []
+            MockFeishuHandler.documents["dox-user-bidir-local"] = {
+                "title": "User Bidir Local",
+                "revision_id": 2,
+                "children": [],
+                "url": "https://example.test/docx/dox-user-bidir-local",
+                "raw_content": "User Bidir Local\nRemote snapshot before a user-mode push.\n",
+            }
+            MockFeishuHandler.documents["dox-user-bidir-remote"] = {
+                "title": "User Bidir Remote",
+                "revision_id": 5,
+                "children": [],
+                "url": "https://example.test/docx/dox-user-bidir-remote",
+                "raw_content": "User Bidir Remote\nRemote revision that should be pulled by the user-mode sync.\n",
+            }
+            MockFeishuHandler._register_drive_child(
+                "fld-user-bidir-suite",
+                {
+                    "name": "User Bidir Local",
+                    "type": "docx",
+                    "token": "dox-user-bidir-local",
+                    "parent_token": "fld-user-bidir-suite",
+                    "url": "https://example.test/docx/dox-user-bidir-local",
+                    "created_time": "1773500100",
+                    "modified_time": "1773500101",
+                },
+            )
+            MockFeishuHandler._register_drive_child(
+                "fld-user-bidir-suite",
+                {
+                    "name": "User Bidir Remote",
+                    "type": "docx",
+                    "token": "dox-user-bidir-remote",
+                    "parent_token": "fld-user-bidir-suite",
+                    "url": "https://example.test/docx/dox-user-bidir-remote",
+                    "created_time": "1773500102",
+                    "modified_time": "1773500103",
+                },
+            )
+
+            user_sync_root = Path(tmp_dir) / "user-sync-root"
+            user_sync_root.mkdir(parents=True, exist_ok=True)
+            (user_sync_root / "push-user.md").write_text(
+                "---\n"
+                "title: User Bidir Local\n"
+                "feishu_doc_token: dox-user-bidir-local\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# User Bidir Local\n"
+                "\n"
+                "Local version ready for a user-mode push.\n",
+                encoding="utf-8",
+            )
+            (user_sync_root / "pull-user.md").write_text(
+                "---\n"
+                "title: User Bidir Remote\n"
+                "feishu_doc_token: dox-user-bidir-remote\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# User Bidir Remote\n"
+                "\n"
+                "Older local copy.\n",
+                encoding="utf-8",
+            )
+            (user_sync_root / "feishu-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "files": [
+                            {
+                                "relative_path": "push-user.md",
+                                "doc_token": "dox-user-bidir-local",
+                                "title": "User Bidir Local",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# User Bidir Local\n\nPrevious local push text."),
+                                "remote_revision_id": 2,
+                                "remote_content_hash": sha256_text(str(MockFeishuHandler.documents["dox-user-bidir-local"]["raw_content"])),
+                                "last_sync_at": "2026-03-14T12:40:00Z",
+                            },
+                            {
+                                "relative_path": "pull-user.md",
+                                "doc_token": "dox-user-bidir-remote",
+                                "title": "User Bidir Remote",
+                                "sync_direction": "bidirectional",
+                                "body_hash": sha256_text("\n# User Bidir Remote\n\nOlder local copy."),
+                                "remote_revision_id": 4,
+                                "remote_content_hash": sha256_text("older remote pull snapshot"),
+                                "last_sync_at": "2026-03-14T12:45:00Z",
+                            },
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            user_sync_dry_run_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(user_sync_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-user-bidir-suite",
+                    "--dry-run",
+                    "--detect-conflicts",
+                    env=user_env,
+                )
+            )
+            if not user_sync_dry_run_result.get("ok") or user_sync_dry_run_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode sync-dir dry-run result: {user_sync_dry_run_result}")
+            user_conflict_detection = user_sync_dry_run_result.get("result", {}).get("conflict_detection", {})
+            if user_conflict_detection.get("state_counts", {}).get("local_ahead") != 1 or user_conflict_detection.get("state_counts", {}).get("remote_ahead") != 1:
+                raise RuntimeError(f"user-mode sync-dir dry-run did not classify one local_ahead and one remote_ahead file: {user_sync_dry_run_result}")
+
+            blocked_user_sync_execute = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "sync-dir",
+                    str(user_sync_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-user-bidir-suite",
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--pull-fidelity",
+                    "low",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_sync_execute.returncode == 0:
+                raise RuntimeError(f"user-mode sync-dir should require --confirm-user-write: {blocked_user_sync_execute.stdout}")
+            blocked_user_sync_execute_payload = extract_json_object(blocked_user_sync_execute.stdout)
+            if "--confirm-user-write" not in str(blocked_user_sync_execute_payload.get("error") or ""):
+                raise RuntimeError(f"user-mode sync-dir did not explain the bidirectional write protection failure: {blocked_user_sync_execute_payload}")
+
+            user_sync_execute_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(user_sync_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-user-bidir-suite",
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--confirm-user-write",
+                    "--pull-fidelity",
+                    "low",
+                    env=user_env,
+                )
+            )
+            if not user_sync_execute_result.get("ok") or user_sync_execute_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode sync-dir execution result: {user_sync_execute_result}")
+            user_sync_execute_summary = user_sync_execute_result.get("result", {}).get("summary", {})
+            if user_sync_execute_summary.get("pushed_count") != 1 or user_sync_execute_summary.get("pulled_count") != 1:
+                raise RuntimeError(f"user-mode sync-dir execution did not run one push and one pull: {user_sync_execute_result}")
+            if "Remote revision that should be pulled by the user-mode sync." not in (user_sync_root / "pull-user.md").read_text(encoding="utf-8"):
+                raise RuntimeError(f"user-mode sync-dir execution did not pull the remote content into the local file: {user_sync_execute_result}")
+
+            user_sync_create_root = Path(tmp_dir) / "user-sync-create-root"
+            user_sync_create_root.mkdir(parents=True, exist_ok=True)
+            (user_sync_create_root / "create-user.md").write_text(
+                "---\n"
+                "title: User Sync Create\n"
+                "feishu_sync_direction: bidirectional\n"
+                "---\n"
+                "\n"
+                "# User Sync Create\n"
+                "\n"
+                "Create this remote doc from user-mode sync-dir.\n",
+                encoding="utf-8",
+            )
+            blocked_user_sync_create = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "sync-dir",
+                    str(user_sync_create_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-user-bidir-suite",
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--confirm-user-write",
+                    "--include-create-flow",
+                ],
+                cwd=str(ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=user_env,
+            )
+            if blocked_user_sync_create.returncode == 0:
+                raise RuntimeError(f"user-mode sync-dir should block create flow without --allow-user-create: {blocked_user_sync_create.stdout}")
+            blocked_user_sync_create_payload = extract_json_object(blocked_user_sync_create.stdout)
+            if "--allow-user-create" not in str(blocked_user_sync_create_payload.get("error") or ""):
+                raise RuntimeError(f"user-mode sync-dir did not explain the protected create flow: {blocked_user_sync_create_payload}")
+
+            user_sync_create_result = json.loads(
+                run_cli(
+                    "sync-dir",
+                    str(user_sync_create_root),
+                    "--auth-mode",
+                    "user",
+                    "--base-url",
+                    base_url,
+                    "--folder-token",
+                    "fld-user-bidir-suite",
+                    "--execute-bidirectional",
+                    "--confirm-bidirectional",
+                    "--confirm-user-write",
+                    "--include-create-flow",
+                    "--allow-user-create",
+                    env=user_env,
+                )
+            )
+            if not user_sync_create_result.get("ok") or user_sync_create_result.get("mode") != "user":
+                raise RuntimeError(f"Unexpected user-mode sync-dir create execution result: {user_sync_create_result}")
+            user_sync_create_summary = user_sync_create_result.get("result", {}).get("summary", {})
+            if user_sync_create_summary.get("pushed_count") != 1 or user_sync_create_summary.get("created_count") != 1:
+                raise RuntimeError(f"user-mode sync-dir create flow did not report one created push: {user_sync_create_result}")
+            user_sync_create_index_payload = json.loads((user_sync_create_root / "feishu-index.json").read_text(encoding="utf-8"))
+            user_sync_create_entry = user_sync_create_index_payload.get("files", [{}])[0]
+            if not str(user_sync_create_entry.get("doc_token") or "").startswith("dox-created-"):
+                raise RuntimeError(f"user-mode sync-dir create flow did not persist the created doc token: {user_sync_create_index_payload}")
 
             conflict_root = Path(tmp_dir) / "conflict-root"
             conflict_root.mkdir(parents=True, exist_ok=True)

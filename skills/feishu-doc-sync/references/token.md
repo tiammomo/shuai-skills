@@ -37,6 +37,8 @@ The scaffold currently includes these auth-oriented commands:
   Fetches a fresh `tenant_access_token` for a self-built app.
 - `python scripts/feishu_doc_sync.py validate-tenant`
   Reuses `FEISHU_TENANT_ACCESS_TOKEN` if present, or fetches a new tenant token and validates connectivity.
+- `python scripts/feishu_doc_sync.py validate-user`
+  Reuses `FEISHU_USER_ACCESS_TOKEN` or `--user-access-token` and validates user-visible connectivity.
 - `python scripts/feishu_doc_sync.py user-auth-url --redirect-uri https://example.com/callback`
   Builds a browser authorization URL for the Feishu user login flow.
 - `python scripts/feishu_doc_sync.py exchange-user-token your_auth_code --redirect-uri https://example.com/callback`
@@ -48,6 +50,39 @@ For a doc-level probe, add:
 
 ```bash
 python scripts/feishu_doc_sync.py validate-tenant --document-id doxxxxxxxxxxxxxxxxxxxxxxxxx
+python scripts/feishu_doc_sync.py validate-user --document-id doxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+For read-only user-visible inspection or export, add `--auth-mode user`:
+
+```bash
+python scripts/feishu_doc_sync.py get-document doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user
+python scripts/feishu_doc_sync.py list-root-files --auth-mode user
+python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user --root ./exports
+```
+
+For protected single-document user-mode writes, add `--confirm-user-write`:
+
+```bash
+python scripts/feishu_doc_sync.py append-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user --confirm-user-write --content "New paragraph"
+python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user --confirm-user-write --confirm-replace --content "# Updated"
+python scripts/feishu_doc_sync.py push-markdown .\\notes.md --auth-mode user --confirm-user-write --confirm-replace
+```
+
+If `push-markdown --auth-mode user` should create a new remote doc for an unmapped file, also add:
+
+```bash
+python scripts/feishu_doc_sync.py push-markdown .\\notes.md --auth-mode user --confirm-user-write --allow-user-create
+```
+
+For protected directory-level user-mode writes and planning, use:
+
+```bash
+python scripts/feishu_doc_sync.py push-dir .\\notes --auth-mode user --confirm-user-write --confirm-replace
+python scripts/feishu_doc_sync.py push-dir .\\notes --auth-mode user --confirm-user-write --allow-user-create
+python scripts/feishu_doc_sync.py sync-dir .\\notes --auth-mode user --dry-run --detect-conflicts
+python scripts/feishu_doc_sync.py sync-dir .\\notes --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write
+python scripts/feishu_doc_sync.py sync-dir .\\notes --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write --include-create-flow --allow-user-create
 ```
 
 ## Self-Built App Token Docs
@@ -124,6 +159,8 @@ Recommended local env mapping for this scaffold:
 Recommended usage:
 
 - set only one of `FEISHU_TENANT_ACCESS_TOKEN` or `FEISHU_USER_ACCESS_TOKEN` per run
+- use `--auth-mode user` on read-only commands when `FEISHU_USER_ACCESS_TOKEN` should drive visibility
+- use `--confirm-user-write` on user-mode write commands so remote changes stay opt-in
 - if the live implementation later fetches tokens dynamically, keep only `FEISHU_APP_ID` and `FEISHU_APP_SECRET`
 
 PowerShell example:

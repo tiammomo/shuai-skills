@@ -48,6 +48,7 @@ OPTIONAL_TOKEN_ENV = (
 )
 OPTIONAL_ENV = ("FEISHU_BASE_URL", "FEISHU_REDIRECT_URI")
 VALID_SYNC_DIRECTIONS = {"push", "pull", "bidirectional"}
+AUTH_MODE_CHOICES = ("tenant", "user")
 SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", ".feishu-sync-backups"}
 
 RECOMMENDED_SCOPES = {
@@ -177,15 +178,38 @@ def build_command_response(
     return response
 
 
-def summarize_tenant_auth(token_result: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+def access_token_doc_for_mode(auth_mode: str) -> str:
+    return TOKEN_DOCS["user_access_token"] if auth_mode == "user" else TOKEN_DOCS["tenant_access_token_internal"]
+
+
+def access_token_label_for_mode(auth_mode: str) -> str:
+    return "user_access_token" if auth_mode == "user" else "tenant_access_token"
+
+
+def identity_label_for_mode(auth_mode: str) -> str:
+    return "user" if auth_mode == "user" else "app"
+
+
+def summarize_auth(token_result: Dict[str, Any]) -> Dict[str, Any]:
+    mode = str(token_result.get("mode") or "")
+    auth = {
         "ok": bool(token_result.get("ok")),
+        "mode": mode or None,
         "status": token_result.get("status"),
         "code": token_result.get("code"),
         "msg": token_result.get("msg"),
         "expire": token_result.get("expire"),
-        "tenant_access_token_preview": token_result.get("tenant_access_token_preview"),
+        "access_token_preview": token_result.get("access_token_preview"),
     }
+    if mode == "tenant":
+        auth["tenant_access_token_preview"] = token_result.get("tenant_access_token_preview")
+    elif mode == "user":
+        auth["user_access_token_preview"] = token_result.get("user_access_token_preview")
+    return auth
+
+
+def summarize_tenant_auth(token_result: Dict[str, Any]) -> Dict[str, Any]:
+    return summarize_auth(token_result)
 
 
 def normalize_base_url(base_url: Optional[str]) -> str:
@@ -522,9 +546,12 @@ def resolve_tenant_token(args: argparse.Namespace) -> Dict[str, Any]:
     if env_token and not getattr(args, "force_refresh", False):
         return {
             "ok": True,
+            "mode": "tenant",
             "source": "env",
             "tenant_access_token": env_token,
             "tenant_access_token_preview": preview_token(env_token),
+            "access_token": env_token,
+            "access_token_preview": preview_token(env_token),
             "expire": None,
             "app_access_token_preview": None,
             "status": None,
@@ -540,9 +567,47 @@ def resolve_tenant_token(args: argparse.Namespace) -> Dict[str, Any]:
         base_url=normalize_base_url(args.base_url),
         timeout=get_request_timeout(args),
     )
+    token_result["mode"] = "tenant"
     token_result["source"] = "fetched"
     token_result["app_id"] = app_id
+    token_result["access_token"] = token_result.get("tenant_access_token")
+    token_result["access_token_preview"] = token_result.get("tenant_access_token_preview")
     return token_result
+
+
+def resolve_user_token(args: argparse.Namespace) -> Dict[str, Any]:
+    explicit_token = getattr(args, "user_access_token", None)
+    env_token = os.getenv("FEISHU_USER_ACCESS_TOKEN")
+    token = explicit_token or env_token
+    if not token:
+        raise ValueError("Missing required value: use --user-access-token or set FEISHU_USER_ACCESS_TOKEN")
+
+    source = "arg" if explicit_token else "env"
+    token_preview = preview_token(token)
+    return {
+        "ok": True,
+        "mode": "user",
+        "source": source,
+        "user_access_token": token,
+        "user_access_token_preview": token_preview,
+        "access_token": token,
+        "access_token_preview": token_preview,
+        "expire": None,
+        "status": None,
+        "code": 0,
+        "msg": (
+            "Using --user-access-token from the command line."
+            if source == "arg"
+            else "Using FEISHU_USER_ACCESS_TOKEN from the environment."
+        ),
+    }
+
+
+def resolve_read_access_token(args: argparse.Namespace) -> Dict[str, Any]:
+    auth_mode = str(getattr(args, "auth_mode", "tenant") or "tenant")
+    if auth_mode == "user":
+        return resolve_user_token(args)
+    return resolve_tenant_token(args)
 
 
 def resolve_app_access_token(args: argparse.Namespace) -> Dict[str, Any]:
@@ -4152,6 +4217,7 @@ def build_sync_dir_dry_run(
     include_diff: bool = False,
     diff_fidelity: str = "low",
     diff_max_lines: int = 80,
+    auth_mode: str = "tenant",
 ) -> Dict[str, Any]:
     resolved_root = root.resolve()
     if not resolved_root.is_dir():
@@ -4200,6 +4266,8 @@ def build_sync_dir_dry_run(
     }
     local_relative_paths = {str(plan["relative_path"]) for plan in local_plans}
     risks: List[Dict[str, Any]] = []
+    visibility_scope = "user-visible" if auth_mode == "user" else "app-visible"
+    push_scope = "user-mode" if auth_mode == "user" else "tenant"
 
     for plan in local_plans:
         doc_token = plan.get("doc_token")
@@ -4209,7 +4277,7 @@ def build_sync_dir_dry_run(
                     "kind": "visibility_missing",
                     "relative_path": plan["relative_path"],
                     "doc_token": doc_token,
-                    "message": "The file is mapped to a remote doc token that is not visible in the current tenant folder listing.",
+                    "message": f"The file is mapped to a remote doc token that is not visible in the current {visibility_scope} folder listing.",
                 }
             )
         if plan.get("sync_direction") == "pull":
@@ -4217,7 +4285,7 @@ def build_sync_dir_dry_run(
                 {
                     "kind": "pull_only_local_file",
                     "relative_path": plan["relative_path"],
-                    "message": "This local file is marked pull-only and will be skipped by tenant push flows unless explicitly overridden.",
+                    "message": f"This local file is marked pull-only and will be skipped by {push_scope} push flows unless explicitly overridden.",
                 }
             )
 
@@ -4328,12 +4396,12 @@ def build_sync_dir_dry_run(
         "notes": [
             "sync-dir dry-run builds the plan without modifying remote docs or feishu-index.json.",
             "Prune execution is available only with --prune --confirm-prune and still does not perform mixed push or pull execution.",
-            "Remote pull candidates are derived from visible app-scoped docx files that are not yet mapped locally.",
+            f"Remote pull candidates are derived from visible {visibility_scope} docx files that are not yet mapped locally.",
             "Prune candidates are limited to index-mapped remote docs whose local Markdown files are now missing.",
         ]
         + (
             [
-                "With --detect-conflicts, sync-dir also fetches remote metadata and raw_content for mapped visible docs so the plan can classify local drift, remote drift, and review-required conflicts."
+                f"With --detect-conflicts, sync-dir also fetches remote metadata and raw_content for mapped {visibility_scope} docs so the plan can classify local drift, remote drift, and review-required conflicts."
             ]
             if detect_conflicts
             else []
@@ -4570,6 +4638,8 @@ def execute_sync_dir_bidirectional(
     allow_auto_merge: bool = False,
     adopt_remote_new: bool = False,
     include_create_flow: bool = False,
+    auth_mode: str = "tenant",
+    allow_create: bool = True,
 ) -> Dict[str, Any]:
     plan = build_sync_dir_dry_run(
         root=root,
@@ -4585,6 +4655,7 @@ def execute_sync_dir_bidirectional(
         prune=False,
         detect_conflicts=True,
         diff_fidelity="high" if allow_auto_merge else "low",
+        auth_mode=auth_mode,
     )
     if not plan.get("ok"):
         return {
@@ -4616,6 +4687,10 @@ def execute_sync_dir_bidirectional(
     if include_create_flow:
         notes.append(
             "With --include-create-flow, unmapped local bidirectional files can create new remote Feishu docs during protected execution."
+        )
+    if auth_mode == "user":
+        notes.append(
+            "User-mode bidirectional execution follows one user's visible drive tree, never performs prune deletes, and still requires explicit create opt-in before inventing new remote docs."
         )
 
     if not execution_plan.get("ok"):
@@ -4724,6 +4799,8 @@ def execute_sync_dir_bidirectional(
                 index_path=str(effective_index_path),
                 confirm_replace=True,
                 ignore_sync_direction=True,
+                auth_mode=auth_mode,
+                allow_create=allow_create,
             )
             execution_results.append(
                 {
@@ -4848,6 +4925,8 @@ def execute_sync_dir_bidirectional(
                 index_path=str(effective_index_path),
                 confirm_replace=True,
                 ignore_sync_direction=True,
+                auth_mode=auth_mode,
+                allow_create=allow_create,
             )
             restore_result = None
             if not push_result.get("ok") or push_result.get("skipped"):
@@ -4902,6 +4981,8 @@ def execute_sync_dir_bidirectional(
                 folder_token_override=folder_token_override,
                 confirm_replace=False,
                 ignore_sync_direction=True,
+                auth_mode=auth_mode,
+                allow_create=allow_create,
             )
             execution_results.append(
                 {
@@ -5540,7 +5621,7 @@ def append_markdown_to_document(
         },
         "write_result": create_result,
         "notes": [
-            "This tenant write path appends converted Markdown blocks under the selected parent block.",
+            "This write path appends converted Markdown blocks under the selected parent block.",
             "It does not replace or clear existing document content before writing.",
             "Table merge_info fields are stripped automatically before descendant block creation.",
         ],
@@ -5701,6 +5782,8 @@ def execute_push_markdown(
     confirm_replace: bool = False,
     ignore_sync_direction: bool = False,
     folder_resolution: Optional[Dict[str, Any]] = None,
+    auth_mode: str = "tenant",
+    allow_create: bool = True,
 ) -> Dict[str, Any]:
     resolved_path = markdown_path.resolve()
     if not resolved_path.is_file():
@@ -5796,6 +5879,21 @@ def execute_push_markdown(
         action = "replace_doc"
         final_doc_token = str(doc_token)
     else:
+        if not allow_create:
+            return {
+                "ok": False,
+                "path": str(resolved_path),
+                "relative_path": relative_path,
+                "title": title,
+                "sync_direction": sync_direction,
+                "action": "create_doc_blocked",
+                "error": (
+                    "user-mode push-markdown currently only updates already mapped docs. "
+                    "Re-run with --allow-user-create and --confirm-user-write to create a new user-visible document."
+                    if auth_mode == "user"
+                    else "This push flow is not allowed to create a new remote document."
+                ),
+            }
         create_result = create_document(
             tenant_access_token=tenant_access_token,
             title=title,
@@ -5881,7 +5979,7 @@ def execute_push_markdown(
         "folder_resolution": folder_resolution,
         "write": write_result,
         "notes": [
-            "push-markdown writes tenant-visible Markdown changes to Feishu and then updates feishu-index.json.",
+            "push-markdown writes Markdown changes to Feishu under the current token identity and then updates feishu-index.json.",
             "Existing documents use replace-markdown; new documents use create-document plus append-markdown.",
         ],
     }
@@ -6456,17 +6554,29 @@ def command_authorize_local(args: argparse.Namespace) -> int:
 
 
 def command_validate_tenant(args: argparse.Namespace) -> int:
+    return command_validate_access(args, auth_mode="tenant")
+
+
+def command_validate_user(args: argparse.Namespace) -> int:
+    return command_validate_access(args, auth_mode="user")
+
+
+def command_validate_access(args: argparse.Namespace, auth_mode: str) -> int:
     base_url = normalize_base_url(args.base_url)
+    command_name = "validate-user" if auth_mode == "user" else "validate-tenant"
+    official_docs = [access_token_doc_for_mode(auth_mode), OFFICIAL_REFERENCES["get_document"]]
+    token_label = access_token_label_for_mode(auth_mode)
+    identity_label = identity_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_user_token(args) if auth_mode == "user" else resolve_tenant_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
-                "validate-tenant",
+                command_name,
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -6474,38 +6584,38 @@ def command_validate_tenant(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print_json(
             build_command_response(
-                "validate-tenant",
+                command_name,
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     result: Dict[str, Any] = {
         "probe": None,
     }
     notes = [
-            "Auth success proves the app_id and app_secret can reach Feishu auth successfully.",
-            "Doc API success still depends on scopes and document-level sharing.",
+        f"Token resolution success proves the current {identity_label} identity can reach Feishu with a {token_label}.",
+        f"Doc API success still depends on scopes and document-level sharing for the current {identity_label} identity.",
     ]
 
     if not token_result.get("ok"):
         print_json(
             build_command_response(
-                "validate-tenant",
+                command_name,
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+                official_docs=official_docs,
                 request={"document_id": args.document_id or args.doc_token},
                 auth=auth,
                 result=result,
-                error="Failed to resolve tenant_access_token for validation.",
+                error=f"Failed to resolve {token_label} for validation.",
                 notes=notes,
             )
         )
@@ -6514,7 +6624,7 @@ def command_validate_tenant(args: argparse.Namespace) -> int:
     document_id = args.document_id or args.doc_token
     if document_id:
         probe = probe_document_connectivity(
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             document_id=document_id,
             base_url=base_url,
             timeout=args.timeout,
@@ -6523,28 +6633,28 @@ def command_validate_tenant(args: argparse.Namespace) -> int:
         ok = bool(probe["ok"])
         if not probe["ok"]:
             notes.append(
-                "If auth succeeded but doc probing failed, check doc scopes and whether the app has been added to the target document."
+                f"If auth succeeded but doc probing failed, check doc scopes and whether the current {identity_label} can access the target document."
             )
     else:
         result["probe"] = {
             "kind": "auth_only",
             "ok": True,
-            "msg": "tenant_access_token acquired successfully. No docx probe was attempted because no --document-id was provided.",
+            "msg": f"{token_label} resolved successfully. No docx probe was attempted because no --document-id was provided.",
         }
         ok = True
 
     print_json(
         build_command_response(
-            "validate-tenant",
+            command_name,
             ok,
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+            official_docs=official_docs,
             request={"document_id": document_id},
             auth=auth,
             result=result,
-            error=None if ok else "Tenant auth succeeded, but the document connectivity probe failed.",
+            error=None if ok else f"{token_label} resolved successfully, but the document connectivity probe failed.",
             notes=notes,
         )
     )
@@ -6631,16 +6741,19 @@ def command_create_document(args: argparse.Namespace) -> int:
 
 def command_get_document(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
+    official_docs = [access_token_doc_for_mode(auth_mode), OFFICIAL_REFERENCES["get_document"]]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "get-document",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -6650,33 +6763,33 @@ def command_get_document(args: argparse.Namespace) -> int:
             build_command_response(
                 "get-document",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "get-document",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
-                request={"document_id": args.document_id},
+                official_docs=official_docs,
+                request={"document_id": args.document_id, "auth_mode": auth_mode},
                 auth=auth,
-                error="Failed to resolve tenant_access_token for get-document.",
+                error=f"Failed to resolve {token_label} for get-document.",
             )
         )
         return 1
 
     result = probe_document_connectivity(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         document_id=args.document_id,
         base_url=base_url,
         timeout=args.timeout,
@@ -6685,11 +6798,11 @@ def command_get_document(args: argparse.Namespace) -> int:
         build_command_response(
             "get-document",
             result["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_document"]],
-            request={"document_id": args.document_id},
+            official_docs=official_docs,
+            request={"document_id": args.document_id, "auth_mode": auth_mode},
             auth=auth,
             result=result,
             error=None if result["ok"] else "Failed to read Feishu document metadata.",
@@ -6700,16 +6813,19 @@ def command_get_document(args: argparse.Namespace) -> int:
 
 def command_get_raw_content(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
+    official_docs = [access_token_doc_for_mode(auth_mode), OFFICIAL_REFERENCES["get_raw_content"]]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "get-raw-content",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_raw_content"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -6719,33 +6835,33 @@ def command_get_raw_content(args: argparse.Namespace) -> int:
             build_command_response(
                 "get-raw-content",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_raw_content"]],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "get-raw-content",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_raw_content"]],
-                request={"document_id": args.document_id},
+                official_docs=official_docs,
+                request={"document_id": args.document_id, "auth_mode": auth_mode},
                 auth=auth,
-                error="Failed to resolve tenant_access_token for get-raw-content.",
+                error=f"Failed to resolve {token_label} for get-raw-content.",
             )
         )
         return 1
 
     result = get_document_raw_content(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         document_id=args.document_id,
         base_url=base_url,
         timeout=args.timeout,
@@ -6754,11 +6870,11 @@ def command_get_raw_content(args: argparse.Namespace) -> int:
         build_command_response(
             "get-raw-content",
             result["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[TOKEN_DOCS["tenant_access_token_internal"], OFFICIAL_REFERENCES["get_raw_content"]],
-            request={"document_id": args.document_id},
+            official_docs=official_docs,
+            request={"document_id": args.document_id, "auth_mode": auth_mode},
             auth=auth,
             result=result,
             error=None if result["ok"] else "Failed to read Feishu raw document content.",
@@ -6878,20 +6994,23 @@ def command_upload_media(args: argparse.Namespace) -> int:
 
 def command_list_root_files(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
+    official_docs = [
+        access_token_doc_for_mode(auth_mode),
+        OFFICIAL_REFERENCES["root_folder_meta"],
+        OFFICIAL_REFERENCES["list_drive_files"],
+    ]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "list-root-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -6901,46 +7020,39 @@ def command_list_root_files(args: argparse.Namespace) -> int:
             build_command_response(
                 "list-root-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "list-root-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "folder_token": args.folder_token,
                     "page_size": args.page_size,
                     "one_page": bool(args.one_page),
                     "max_pages": args.max_pages,
                 },
                 auth=auth,
-                error="Failed to resolve tenant_access_token for list-root-files.",
+                error=f"Failed to resolve {token_label} for list-root-files.",
             )
         )
         return 1
 
     root_result = get_root_folder_meta(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         base_url=base_url,
         timeout=args.timeout,
     )
@@ -6949,15 +7061,12 @@ def command_list_root_files(args: argparse.Namespace) -> int:
             build_command_response(
                 "list-root-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "folder_token": args.folder_token,
                     "page_size": args.page_size,
                     "one_page": bool(args.one_page),
@@ -6979,7 +7088,7 @@ def command_list_root_files(args: argparse.Namespace) -> int:
     while True:
         page_count += 1
         page_result = list_drive_files(
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             base_url=base_url,
             timeout=args.timeout,
             folder_token=root_token,
@@ -7003,15 +7112,12 @@ def command_list_root_files(args: argparse.Namespace) -> int:
                 build_command_response(
                     "list-root-files",
                     False,
-                    mode="tenant",
+                    mode=auth_mode,
                     base_url=base_url,
                     token_source=token_result.get("source"),
-                    official_docs=[
-                        TOKEN_DOCS["tenant_access_token_internal"],
-                        OFFICIAL_REFERENCES["root_folder_meta"],
-                        OFFICIAL_REFERENCES["list_drive_files"],
-                    ],
+                    official_docs=official_docs,
                     request={
+                        "auth_mode": auth_mode,
                         "folder_token": args.folder_token,
                         "page_size": args.page_size,
                         "one_page": bool(args.one_page),
@@ -7041,15 +7147,12 @@ def command_list_root_files(args: argparse.Namespace) -> int:
         build_command_response(
             "list-root-files",
             True,
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[
-                TOKEN_DOCS["tenant_access_token_internal"],
-                OFFICIAL_REFERENCES["root_folder_meta"],
-                OFFICIAL_REFERENCES["list_drive_files"],
-            ],
+            official_docs=official_docs,
             request={
+                "auth_mode": auth_mode,
                 "folder_token": args.folder_token,
                 "page_size": args.page_size,
                 "one_page": bool(args.one_page),
@@ -7065,7 +7168,7 @@ def command_list_root_files(args: argparse.Namespace) -> int:
             },
             notes=[
                 "This command lists files visible to the current token under the resolved root folder token.",
-                "If expected files are missing, the app likely does not have document-level access to them yet.",
+                f"If expected files are missing, the current {identity_label_for_mode(auth_mode)} likely does not have document-level access to them yet.",
             ],
         )
     )
@@ -7074,20 +7177,23 @@ def command_list_root_files(args: argparse.Namespace) -> int:
 
 def command_list_folder_files(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
+    official_docs = [
+        access_token_doc_for_mode(auth_mode),
+        OFFICIAL_REFERENCES["root_folder_meta"],
+        OFFICIAL_REFERENCES["list_drive_files"],
+    ]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "list-folder-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7097,33 +7203,26 @@ def command_list_folder_files(args: argparse.Namespace) -> int:
             build_command_response(
                 "list-folder-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "list-folder-files",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["root_folder_meta"],
-                    OFFICIAL_REFERENCES["list_drive_files"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "folder_token": args.folder_token,
                     "recursive": bool(args.recursive),
                     "max_depth": args.max_depth,
@@ -7131,13 +7230,13 @@ def command_list_folder_files(args: argparse.Namespace) -> int:
                     "max_pages": args.max_pages,
                 },
                 auth=auth,
-                error="Failed to resolve tenant_access_token for list-folder-files.",
+                error=f"Failed to resolve {token_label} for list-folder-files.",
             )
         )
         return 1
 
     result = list_drive_folder_contents(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         base_url=base_url,
         timeout=args.timeout,
         folder_token=args.folder_token,
@@ -7150,15 +7249,12 @@ def command_list_folder_files(args: argparse.Namespace) -> int:
         build_command_response(
             "list-folder-files",
             result["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[
-                TOKEN_DOCS["tenant_access_token_internal"],
-                OFFICIAL_REFERENCES["root_folder_meta"],
-                OFFICIAL_REFERENCES["list_drive_files"],
-            ],
+            official_docs=official_docs,
             request={
+                "auth_mode": auth_mode,
                 "folder_token": args.folder_token,
                 "recursive": bool(args.recursive),
                 "max_depth": args.max_depth,
@@ -7169,7 +7265,7 @@ def command_list_folder_files(args: argparse.Namespace) -> int:
             result=result,
             error=None if result["ok"] else result.get("error", "Failed to list the requested drive folder."),
             notes=[
-                "This command can enumerate a specific folder token or fall back to the app-visible root folder.",
+                "This command can enumerate a specific folder token or fall back to the current token-visible root folder.",
                 "Use --recursive to walk nested folders and surface docx files beyond one level.",
             ],
         )
@@ -7259,14 +7355,17 @@ def command_delete_document(args: argparse.Namespace) -> int:
 
 def command_pull_markdown(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
     official_docs = [
-        TOKEN_DOCS["tenant_access_token_internal"],
+        access_token_doc_for_mode(auth_mode),
         OFFICIAL_REFERENCES["get_document"],
         OFFICIAL_REFERENCES["get_raw_content"],
     ]
     if args.fidelity == "high":
         official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["list_document_blocks"]])
+    token_label = access_token_label_for_mode(auth_mode)
     request_payload = {
+        "auth_mode": auth_mode,
         "document_id": args.document_id,
         "output": args.output,
         "root": args.root,
@@ -7280,13 +7379,13 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
         "fidelity": args.fidelity,
     }
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "pull-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -7298,7 +7397,7 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "pull-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -7306,19 +7405,19 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "pull-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
                 request=request_payload,
                 auth=auth,
-                error="Failed to resolve tenant_access_token for pull-markdown.",
+                error=f"Failed to resolve {token_label} for pull-markdown.",
             )
         )
         return 1
@@ -7326,7 +7425,7 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
     try:
         result = execute_pull_markdown(
             document_id=args.document_id,
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             base_url=base_url,
             timeout=args.timeout,
             output_path=args.output,
@@ -7345,7 +7444,7 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "pull-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
@@ -7362,7 +7461,7 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
         build_command_response(
             "pull-markdown",
             result["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
             official_docs=official_docs,
@@ -7378,8 +7477,15 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
 
 def command_append_markdown(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(getattr(args, "auth_mode", "tenant"))
+    official_docs = [
+        access_token_doc_for_mode(auth_mode),
+        OFFICIAL_REFERENCES["convert_markdown_html"],
+        OFFICIAL_REFERENCES["create_descendant_blocks"],
+    ]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
         markdown_content, source_info = load_markdown_content(
             markdown_file=args.markdown_file,
             inline_content=args.content,
@@ -7390,13 +7496,9 @@ def command_append_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "append-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7406,13 +7508,9 @@ def command_append_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "append-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7422,33 +7520,26 @@ def command_append_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "append-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "append-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "document_id": args.document_id,
                     "document_revision_id": args.document_revision_id,
                     "parent_block_id": args.parent_block_id,
@@ -7459,7 +7550,29 @@ def command_append_markdown(args: argparse.Namespace) -> int:
                     "show_converted_blocks": bool(args.show_converted_blocks),
                 },
                 auth=auth,
-                error="Failed to resolve tenant_access_token for append-markdown.",
+                error=f"Failed to resolve {token_label} for append-markdown.",
+            )
+        )
+        return 1
+
+    if auth_mode == "user" and not args.confirm_user_write:
+        print_json(
+            build_command_response(
+                "append-markdown",
+                False,
+                mode="user",
+                base_url=base_url,
+                token_source=token_result.get("source"),
+                official_docs=official_docs,
+                request={
+                    "auth_mode": auth_mode,
+                    "document_id": args.document_id,
+                    "confirm_user_write": False,
+                    "document_revision_id": args.document_revision_id,
+                    "parent_block_id": args.parent_block_id,
+                },
+                auth=auth,
+                error="User-mode remote writes are protected. Re-run with --confirm-user-write after confirming the target user-visible document.",
             )
         )
         return 1
@@ -7469,14 +7582,11 @@ def command_append_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "append-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "document_id": args.document_id,
                     "keep_front_matter": bool(args.keep_front_matter),
                 },
@@ -7487,7 +7597,7 @@ def command_append_markdown(args: argparse.Namespace) -> int:
         return 1
 
     response = append_markdown_to_document(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         document_id=args.document_id,
         markdown_content=markdown_content,
         source_info=source_info,
@@ -7507,21 +7617,19 @@ def command_append_markdown(args: argparse.Namespace) -> int:
         build_command_response(
             "append-markdown",
             response["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[
-                TOKEN_DOCS["tenant_access_token_internal"],
-                OFFICIAL_REFERENCES["convert_markdown_html"],
-                OFFICIAL_REFERENCES["create_descendant_blocks"],
-            ],
+            official_docs=official_docs,
             request={
+                "auth_mode": auth_mode,
                 "document_id": args.document_id,
                 "document_revision_id": args.document_revision_id,
                 "parent_block_id": args.parent_block_id,
                 "user_id_type": args.user_id_type,
                 "index": args.index,
                 "client_token": args.client_token,
+                "confirm_user_write": bool(args.confirm_user_write),
                 "keep_front_matter": bool(args.keep_front_matter),
                 "show_converted_blocks": bool(args.show_converted_blocks),
                 "markdown_source": source_info,
@@ -7537,8 +7645,17 @@ def command_append_markdown(args: argparse.Namespace) -> int:
 
 def command_replace_markdown(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(getattr(args, "auth_mode", "tenant"))
+    official_docs = [
+        access_token_doc_for_mode(auth_mode),
+        OFFICIAL_REFERENCES["list_document_blocks"],
+        OFFICIAL_REFERENCES["delete_block_children"],
+        OFFICIAL_REFERENCES["convert_markdown_html"],
+        OFFICIAL_REFERENCES["create_descendant_blocks"],
+    ]
+    token_label = access_token_label_for_mode(auth_mode)
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
         markdown_content, source_info = load_markdown_content(
             markdown_file=args.markdown_file,
             inline_content=args.content,
@@ -7549,15 +7666,9 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7567,15 +7678,9 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7585,46 +7690,57 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "document_id": args.document_id,
                     "document_revision_id": args.document_revision_id,
                     "user_id_type": args.user_id_type,
                     "confirm_replace": bool(args.confirm_replace),
+                    "confirm_user_write": bool(args.confirm_user_write),
                     "keep_front_matter": bool(args.keep_front_matter),
                     "show_converted_blocks": bool(args.show_converted_blocks),
                 },
                 auth=auth,
-                error="Failed to resolve tenant_access_token for replace-markdown.",
+                error=f"Failed to resolve {token_label} for replace-markdown.",
+            )
+        )
+        return 1
+
+    if auth_mode == "user" and not args.confirm_user_write:
+        print_json(
+            build_command_response(
+                "replace-markdown",
+                False,
+                mode="user",
+                base_url=base_url,
+                token_source=token_result.get("source"),
+                official_docs=official_docs,
+                request={
+                    "auth_mode": auth_mode,
+                    "document_id": args.document_id,
+                    "confirm_replace": bool(args.confirm_replace),
+                    "confirm_user_write": False,
+                },
+                auth=auth,
+                error="User-mode remote writes are protected. Re-run with --confirm-user-write after confirming the target user-visible document.",
             )
         )
         return 1
@@ -7634,16 +7750,11 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "document_id": args.document_id,
                     "confirm_replace": False,
                 },
@@ -7658,16 +7769,11 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "replace-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["list_document_blocks"],
-                    OFFICIAL_REFERENCES["delete_block_children"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 request={
+                    "auth_mode": auth_mode,
                     "document_id": args.document_id,
                     "confirm_replace": True,
                     "keep_front_matter": bool(args.keep_front_matter),
@@ -7679,7 +7785,7 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
         return 1
 
     response = replace_markdown_in_document(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         document_id=args.document_id,
         markdown_content=markdown_content,
         source_info=source_info,
@@ -7696,21 +7802,17 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
         build_command_response(
             "replace-markdown",
             response["ok"],
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[
-                TOKEN_DOCS["tenant_access_token_internal"],
-                OFFICIAL_REFERENCES["list_document_blocks"],
-                OFFICIAL_REFERENCES["delete_block_children"],
-                OFFICIAL_REFERENCES["convert_markdown_html"],
-                OFFICIAL_REFERENCES["create_descendant_blocks"],
-            ],
+            official_docs=official_docs,
             request={
+                "auth_mode": auth_mode,
                 "document_id": args.document_id,
                 "document_revision_id": args.document_revision_id,
                 "user_id_type": args.user_id_type,
                 "confirm_replace": bool(args.confirm_replace),
+                "confirm_user_write": bool(args.confirm_user_write),
                 "keep_front_matter": bool(args.keep_front_matter),
                 "show_converted_blocks": bool(args.show_converted_blocks),
                 "markdown_source": source_info,
@@ -7726,21 +7828,36 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
 
 def command_push_markdown(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(getattr(args, "auth_mode", "tenant"))
+    official_docs = [
+        access_token_doc_for_mode(auth_mode),
+        OFFICIAL_REFERENCES["create_document"],
+        OFFICIAL_REFERENCES["convert_markdown_html"],
+        OFFICIAL_REFERENCES["create_descendant_blocks"],
+    ]
+    token_label = access_token_label_for_mode(auth_mode)
+    request_payload = {
+        "auth_mode": auth_mode,
+        "path": str(Path(args.path).resolve()),
+        "root": str(Path(args.root).resolve()) if args.root else None,
+        "index_path": args.index_path,
+        "folder_token": args.folder_token,
+        "keep_front_matter": bool(args.keep_front_matter),
+        "confirm_replace": bool(args.confirm_replace),
+        "confirm_user_write": bool(args.confirm_user_write),
+        "allow_user_create": bool(args.allow_user_create),
+        "ignore_sync_direction": bool(args.ignore_sync_direction),
+    }
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "push-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["create_document"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
@@ -7750,45 +7867,43 @@ def command_push_markdown(args: argparse.Namespace) -> int:
             build_command_response(
                 "push-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["create_document"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
+                official_docs=official_docs,
                 error=str(exc),
             )
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "push-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["create_document"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
-                request={
-                    "path": str(Path(args.path).resolve()),
-                    "root": str(Path(args.root).resolve()) if args.root else None,
-                    "index_path": args.index_path,
-                    "folder_token": args.folder_token,
-                    "keep_front_matter": bool(args.keep_front_matter),
-                    "confirm_replace": bool(args.confirm_replace),
-                    "ignore_sync_direction": bool(args.ignore_sync_direction),
-                },
+                official_docs=official_docs,
+                request=request_payload,
                 auth=auth,
-                error="Failed to resolve tenant_access_token for push-markdown.",
+                error=f"Failed to resolve {token_label} for push-markdown.",
+            )
+        )
+        return 1
+
+    if auth_mode == "user" and not args.confirm_user_write:
+        print_json(
+            build_command_response(
+                "push-markdown",
+                False,
+                mode="user",
+                base_url=base_url,
+                token_source=token_result.get("source"),
+                official_docs=official_docs,
+                request=request_payload,
+                auth=auth,
+                error="User-mode remote writes are protected. Re-run with --confirm-user-write after confirming the target user-visible document or mapping.",
             )
         )
         return 1
@@ -7796,7 +7911,7 @@ def command_push_markdown(args: argparse.Namespace) -> int:
     try:
         result = execute_push_markdown(
             markdown_path=Path(args.path),
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             base_url=normalize_base_url(args.base_url),
             timeout=args.timeout,
             root=Path(args.root).resolve() if args.root else None,
@@ -7805,30 +7920,19 @@ def command_push_markdown(args: argparse.Namespace) -> int:
             keep_front_matter=args.keep_front_matter,
             confirm_replace=args.confirm_replace,
             ignore_sync_direction=args.ignore_sync_direction,
+            auth_mode=auth_mode,
+            allow_create=bool(args.allow_user_create) if auth_mode == "user" else True,
         )
     except (ValueError, FileNotFoundError) as exc:
         print_json(
             build_command_response(
                 "push-markdown",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
-                official_docs=[
-                    TOKEN_DOCS["tenant_access_token_internal"],
-                    OFFICIAL_REFERENCES["create_document"],
-                    OFFICIAL_REFERENCES["convert_markdown_html"],
-                    OFFICIAL_REFERENCES["create_descendant_blocks"],
-                ],
-                request={
-                    "path": str(Path(args.path).resolve()),
-                    "root": str(Path(args.root).resolve()) if args.root else None,
-                    "index_path": args.index_path,
-                    "folder_token": args.folder_token,
-                    "keep_front_matter": bool(args.keep_front_matter),
-                    "confirm_replace": bool(args.confirm_replace),
-                    "ignore_sync_direction": bool(args.ignore_sync_direction),
-                },
+                official_docs=official_docs,
+                request=request_payload,
                 auth=auth,
                 error=str(exc),
             )
@@ -7841,27 +7945,14 @@ def command_push_markdown(args: argparse.Namespace) -> int:
         build_command_response(
             "push-markdown",
             result.get("ok", False),
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
-            official_docs=[
-                TOKEN_DOCS["tenant_access_token_internal"],
-                OFFICIAL_REFERENCES["create_document"],
-                OFFICIAL_REFERENCES["convert_markdown_html"],
-                OFFICIAL_REFERENCES["create_descendant_blocks"],
-            ],
-            request={
-                "path": str(Path(args.path).resolve()),
-                "root": str(Path(args.root).resolve()) if args.root else None,
-                "index_path": args.index_path,
-                "folder_token": args.folder_token,
-                "keep_front_matter": bool(args.keep_front_matter),
-                "confirm_replace": bool(args.confirm_replace),
-                "ignore_sync_direction": bool(args.ignore_sync_direction),
-            },
+            official_docs=official_docs,
+            request=request_payload,
             auth=auth,
             result=result_payload,
-            error=None if result.get("ok") else "push-markdown did not finish successfully.",
+            error=None if result.get("ok") else result.get("error", "push-markdown did not finish successfully."),
             notes=notes,
         )
     )
@@ -7870,8 +7961,9 @@ def command_push_markdown(args: argparse.Namespace) -> int:
 
 def command_push_dir(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
     official_docs = [
-        TOKEN_DOCS["tenant_access_token_internal"],
+        access_token_doc_for_mode(auth_mode),
         OFFICIAL_REFERENCES["create_document"],
         OFFICIAL_REFERENCES["convert_markdown_html"],
         OFFICIAL_REFERENCES["create_descendant_blocks"],
@@ -7885,7 +7977,9 @@ def command_push_dir(args: argparse.Namespace) -> int:
                 OFFICIAL_REFERENCES["list_drive_files"],
             ],
         )
+    token_label = access_token_label_for_mode(auth_mode)
     request_payload = {
+        "auth_mode": auth_mode,
         "path": str(Path(args.path).resolve()),
         "index_path": args.index_path,
         "folder_token": args.folder_token,
@@ -7894,15 +7988,17 @@ def command_push_dir(args: argparse.Namespace) -> int:
         "ignore_sync_direction": bool(args.ignore_sync_direction),
         "continue_on_error": bool(args.continue_on_error),
         "mirror_remote_folders": bool(args.mirror_remote_folders),
+        "confirm_user_write": bool(args.confirm_user_write),
+        "allow_user_create": bool(args.allow_user_create),
     }
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "push-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -7914,7 +8010,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "push-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -7922,19 +8018,34 @@ def command_push_dir(args: argparse.Namespace) -> int:
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "push-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
                 request=request_payload,
                 auth=auth,
-                error="Failed to resolve tenant_access_token for push-dir.",
+                error=f"Failed to resolve {token_label} for push-dir.",
+            )
+        )
+        return 1
+    if auth_mode == "user" and not args.confirm_user_write:
+        print_json(
+            build_command_response(
+                "push-dir",
+                False,
+                mode="user",
+                base_url=base_url,
+                token_source=token_result.get("source"),
+                official_docs=official_docs,
+                request=request_payload,
+                auth=auth,
+                error="User-mode remote directory writes are protected. Re-run with --confirm-user-write after confirming the target user-visible mappings and folder scope.",
             )
         )
         return 1
@@ -7945,7 +8056,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "push-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
@@ -7957,6 +8068,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
         return 1
 
     effective_index_path = resolve_index_path(root, args.index_path)
+    allow_create = bool(args.allow_user_create) if auth_mode == "user" else True
     folder_cache: Optional[Dict[str, str]] = None
     child_listing_cache: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
     root_folder_token: Optional[str] = None
@@ -7968,7 +8080,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
                 build_command_response(
                     "push-dir",
                     False,
-                    mode="tenant",
+                    mode=auth_mode,
                     base_url=base_url,
                     token_source=token_result.get("source"),
                     official_docs=official_docs,
@@ -7981,7 +8093,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
             return 1
 
         folder_ref = resolve_drive_folder_reference(
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             base_url=base_url,
             timeout=args.timeout,
             folder_token=args.folder_token,
@@ -7991,7 +8103,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
                 build_command_response(
                     "push-dir",
                     False,
-                    mode="tenant",
+                    mode=auth_mode,
                     base_url=base_url,
                     token_source=token_result.get("source"),
                     official_docs=official_docs,
@@ -8021,12 +8133,12 @@ def command_push_dir(args: argparse.Namespace) -> int:
         derived_folder_token = None
         folder_resolution = None
         try:
-            if args.mirror_remote_folders and root_folder_token and folder_cache is not None and child_listing_cache is not None:
+            if args.mirror_remote_folders and allow_create and root_folder_token and folder_cache is not None and child_listing_cache is not None:
                 plan = plan_file(path, mode="push", root=root, index_path=effective_index_path)
                 if plan.get("action") == "create_doc_in_root":
                     relative_dir = normalize_relative_dir(Path(str(plan["relative_path"])).parent.as_posix())
                     folder_resolution = ensure_remote_folder_hierarchy(
-                        tenant_access_token=str(token_result["tenant_access_token"]),
+                        tenant_access_token=str(token_result["access_token"]),
                         root_folder_token=root_folder_token,
                         relative_dir=relative_dir,
                         base_url=base_url,
@@ -8056,7 +8168,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
 
             result = execute_push_markdown(
                 markdown_path=path,
-                tenant_access_token=str(token_result["tenant_access_token"]),
+                tenant_access_token=str(token_result["access_token"]),
                 base_url=base_url,
                 timeout=args.timeout,
                 root=root,
@@ -8067,6 +8179,8 @@ def command_push_dir(args: argparse.Namespace) -> int:
                 confirm_replace=args.confirm_replace,
                 ignore_sync_direction=args.ignore_sync_direction,
                 folder_resolution=folder_resolution,
+                auth_mode=auth_mode,
+                allow_create=allow_create,
             )
         except (ValueError, FileNotFoundError) as exc:
             result = {
@@ -8097,9 +8211,13 @@ def command_push_dir(args: argparse.Namespace) -> int:
         "results": results,
     }
     notes = [
-            "push-dir executes tenant-mode push-markdown for every Markdown file under the target root.",
+            f"push-dir executes {auth_mode}-mode push-markdown for every Markdown file under the target root.",
             "Existing documents require --confirm-replace because updates clear the remote doc body before writing.",
     ]
+    if auth_mode == "user":
+        notes.append(
+            "User-mode push-dir updates mapped docs by default; add --allow-user-create only when unmapped local files should create new user-visible docs."
+        )
     if args.mirror_remote_folders:
         notes.append(
             "With --mirror-remote-folders, new docs without an explicit folder token inherit a remote folder path derived from the local directory tree."
@@ -8108,7 +8226,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
         build_command_response(
             "push-dir",
             failed == 0,
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
             official_docs=official_docs,
@@ -8124,8 +8242,9 @@ def command_push_dir(args: argparse.Namespace) -> int:
 
 def command_pull_dir(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
     official_docs = [
-        TOKEN_DOCS["tenant_access_token_internal"],
+        access_token_doc_for_mode(auth_mode),
         OFFICIAL_REFERENCES["root_folder_meta"],
         OFFICIAL_REFERENCES["list_drive_files"],
         OFFICIAL_REFERENCES["get_document"],
@@ -8133,7 +8252,9 @@ def command_pull_dir(args: argparse.Namespace) -> int:
     ]
     if args.fidelity == "high":
         official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["list_document_blocks"]])
+    token_label = access_token_label_for_mode(auth_mode)
     request_payload = {
+        "auth_mode": auth_mode,
         "path": args.path,
         "folder_token": args.folder_token,
         "recursive": bool(args.recursive),
@@ -8144,13 +8265,13 @@ def command_pull_dir(args: argparse.Namespace) -> int:
         "fidelity": args.fidelity,
     }
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "pull-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -8162,7 +8283,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "pull-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -8170,19 +8291,19 @@ def command_pull_dir(args: argparse.Namespace) -> int:
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "pull-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
                 request=request_payload,
                 auth=auth,
-                error="Failed to resolve tenant_access_token for pull-dir.",
+                error=f"Failed to resolve {token_label} for pull-dir.",
             )
         )
         return 1
@@ -8195,7 +8316,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
     used_paths = set(existing_markdown_paths)
 
     listing = list_drive_folder_contents(
-        tenant_access_token=str(token_result["tenant_access_token"]),
+        tenant_access_token=str(token_result["access_token"]),
         base_url=base_url,
         timeout=args.timeout,
         folder_token=args.folder_token,
@@ -8209,7 +8330,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "pull-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
@@ -8233,7 +8354,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
         relative_path, path_source = derive_relative_pull_path(remote_doc, doc_token_index, used_paths)
         result = execute_pull_markdown(
             document_id=doc_token,
-            tenant_access_token=str(token_result["tenant_access_token"]),
+            tenant_access_token=str(token_result["access_token"]),
             base_url=base_url,
             timeout=args.timeout,
             root=root,
@@ -8260,7 +8381,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
         build_command_response(
             "pull-dir",
             response_ok,
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
             official_docs=official_docs,
@@ -8301,8 +8422,9 @@ def command_pull_dir(args: argparse.Namespace) -> int:
 
 def command_sync_dir(args: argparse.Namespace) -> int:
     base_url = normalize_base_url(args.base_url)
+    auth_mode = str(args.auth_mode)
     official_docs = [
-        TOKEN_DOCS["tenant_access_token_internal"],
+        access_token_doc_for_mode(auth_mode),
         OFFICIAL_REFERENCES["root_folder_meta"],
         OFFICIAL_REFERENCES["list_drive_files"],
         OFFICIAL_REFERENCES["get_document"],
@@ -8322,7 +8444,9 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 OFFICIAL_REFERENCES["delete_block_children"],
             ],
         )
+    token_label = access_token_label_for_mode(auth_mode)
     request_payload = {
+        "auth_mode": auth_mode,
         "path": args.path,
         "folder_token": args.folder_token,
         "index_path": args.index_path,
@@ -8345,13 +8469,15 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         "allow_auto_merge": bool(args.allow_auto_merge),
         "adopt_remote_new": bool(args.adopt_remote_new),
         "include_create_flow": bool(args.include_create_flow),
+        "confirm_user_write": bool(args.confirm_user_write),
+        "allow_user_create": bool(args.allow_user_create),
     }
     if args.prune and args.execute_bidirectional:
         print_json(
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8364,7 +8490,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8377,7 +8503,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8390,7 +8516,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8403,7 +8529,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8416,7 +8542,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8429,7 +8555,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8442,7 +8568,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8455,11 +8581,50 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
                 error="--allow-auto-merge, --adopt-remote-new, and --include-create-flow only apply when --execute-bidirectional is enabled.",
+            )
+        )
+        return 1
+    if args.allow_user_create and auth_mode != "user":
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode=auth_mode,
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--allow-user-create only applies with --auth-mode user.",
+            )
+        )
+        return 1
+    if args.allow_user_create and not args.execute_bidirectional:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode=auth_mode,
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--allow-user-create only applies when --execute-bidirectional is enabled.",
+            )
+        )
+        return 1
+    if args.allow_user_create and not args.include_create_flow:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode=auth_mode,
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="--allow-user-create only applies together with --include-create-flow.",
             )
         )
         return 1
@@ -8468,7 +8633,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8481,11 +8646,50 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
                 error="--pull-fidelity must be either low or high.",
+            )
+        )
+        return 1
+    if auth_mode == "user" and args.prune and not args.dry_run:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="user",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="User-mode sync-dir does not execute remote prune deletes. Re-run in tenant mode for prune, or stay in --dry-run / --execute-bidirectional user mode for review and protected mapped writes.",
+            )
+        )
+        return 1
+    if auth_mode == "user" and args.execute_bidirectional and not args.confirm_user_write:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="user",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="User-mode bidirectional writes are protected. Re-run with --confirm-user-write after reviewing the dry-run plan for the current user-visible folder tree.",
+            )
+        )
+        return 1
+    if auth_mode == "user" and args.execute_bidirectional and args.include_create_flow and not args.allow_user_create:
+        print_json(
+            build_command_response(
+                "sync-dir",
+                False,
+                mode="user",
+                base_url=base_url,
+                official_docs=official_docs,
+                request=request_payload,
+                error="User-mode create flow is disabled by default. Re-run with --allow-user-create and --confirm-user-write if unmapped local bidirectional files should create new user-visible docs.",
             )
         )
         return 1
@@ -8494,7 +8698,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 request=request_payload,
@@ -8504,13 +8708,13 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        token_result = resolve_tenant_token(args)
+        token_result = resolve_read_access_token(args)
     except ValueError as exc:
         print_json(
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -8522,7 +8726,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 official_docs=official_docs,
                 error=str(exc),
@@ -8530,19 +8734,19 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         )
         return 1
 
-    auth = summarize_tenant_auth(token_result)
+    auth = summarize_auth(token_result)
     if not token_result.get("ok"):
         print_json(
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
                 request=request_payload,
                 auth=auth,
-                error="Failed to resolve tenant_access_token for sync-dir.",
+                error=f"Failed to resolve {token_label} for sync-dir.",
             )
         )
         return 1
@@ -8551,7 +8755,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         if args.dry_run:
             result = build_sync_dir_dry_run(
                 root=Path(args.path),
-                tenant_access_token=str(token_result["tenant_access_token"]),
+                tenant_access_token=str(token_result["access_token"]),
                 base_url=base_url,
                 timeout=args.timeout,
                 folder_token=args.folder_token,
@@ -8565,11 +8769,12 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 include_diff=args.include_diff,
                 diff_fidelity=args.diff_fidelity,
                 diff_max_lines=args.diff_max_lines,
+                auth_mode=auth_mode,
             )
         elif args.execute_bidirectional:
             result = execute_sync_dir_bidirectional(
                 root=Path(args.path),
-                tenant_access_token=str(token_result["tenant_access_token"]),
+                tenant_access_token=str(token_result["access_token"]),
                 base_url=base_url,
                 timeout=args.timeout,
                 folder_token=args.folder_token,
@@ -8584,11 +8789,13 @@ def command_sync_dir(args: argparse.Namespace) -> int:
                 allow_auto_merge=args.allow_auto_merge,
                 adopt_remote_new=args.adopt_remote_new,
                 include_create_flow=args.include_create_flow,
+                auth_mode=auth_mode,
+                allow_create=bool(args.allow_user_create) if auth_mode == "user" else True,
             )
         else:
             result = execute_sync_dir_prune(
                 root=Path(args.path),
-                tenant_access_token=str(token_result["tenant_access_token"]),
+                tenant_access_token=str(token_result["access_token"]),
                 base_url=base_url,
                 timeout=args.timeout,
                 folder_token=args.folder_token,
@@ -8605,7 +8812,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
             build_command_response(
                 "sync-dir",
                 False,
-                mode="tenant",
+                mode=auth_mode,
                 base_url=base_url,
                 token_source=token_result.get("source"),
                 official_docs=official_docs,
@@ -8622,7 +8829,7 @@ def command_sync_dir(args: argparse.Namespace) -> int:
         build_command_response(
             "sync-dir",
             result.get("ok", False),
-            mode="tenant",
+            mode=auth_mode,
             base_url=base_url,
             token_source=token_result.get("source"),
             official_docs=official_docs,
@@ -8789,6 +8996,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate_tenant_parser.add_argument("--doc-token", help="Alias of --document-id for docx document token values.")
     validate_tenant_parser.set_defaults(func=command_validate_tenant)
 
+    validate_user_parser = subparsers.add_parser(
+        "validate-user",
+        help="Reuse a user_access_token and validate user-visible connectivity.",
+    )
+    validate_user_parser.add_argument("--user-access-token", help="Feishu user_access_token. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    validate_user_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
+    validate_user_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
+    validate_user_parser.add_argument("--document-id", help="Optional docx document id used for a read-only probe.")
+    validate_user_parser.add_argument("--doc-token", help="Alias of --document-id for docx document token values.")
+    validate_user_parser.set_defaults(func=command_validate_user)
+
     create_document_parser = subparsers.add_parser(
         "create-document",
         help="Create a real Feishu docx document with a tenant token.",
@@ -8812,6 +9030,8 @@ def build_parser() -> argparse.ArgumentParser:
     get_document_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     get_document_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     get_document_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    get_document_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to read with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
+    get_document_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     get_document_parser.set_defaults(func=command_get_document)
 
     get_raw_content_parser = subparsers.add_parser(
@@ -8824,6 +9044,8 @@ def build_parser() -> argparse.ArgumentParser:
     get_raw_content_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     get_raw_content_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     get_raw_content_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    get_raw_content_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to read with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
+    get_raw_content_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     get_raw_content_parser.set_defaults(func=command_get_raw_content)
 
     list_root_files_parser = subparsers.add_parser(
@@ -8835,6 +9057,8 @@ def build_parser() -> argparse.ArgumentParser:
     list_root_files_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     list_root_files_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     list_root_files_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    list_root_files_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to list the current user's visible drive root.")
+    list_root_files_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     list_root_files_parser.add_argument("--folder-token", help="Optional folder token override. Defaults to the resolved root folder token.")
     list_root_files_parser.add_argument("--page-size", type=int, default=100, help="Drive page size. Defaults to 100.")
     list_root_files_parser.add_argument("--one-page", action="store_true", help="Fetch only the first page.")
@@ -8843,7 +9067,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_folder_files_parser = subparsers.add_parser(
         "list-folder-files",
-        help="List files under a specific Feishu folder token or the app-visible root folder.",
+        help="List files under a specific Feishu folder token or the current token-visible root folder.",
     )
     list_folder_files_parser.add_argument("--folder-token", help="Optional starting folder token. Defaults to the resolved root folder.")
     list_folder_files_parser.add_argument("--recursive", action="store_true", help="Walk nested folders recursively.")
@@ -8855,6 +9079,8 @@ def build_parser() -> argparse.ArgumentParser:
     list_folder_files_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     list_folder_files_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     list_folder_files_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    list_folder_files_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to traverse folders visible to one user.")
+    list_folder_files_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     list_folder_files_parser.set_defaults(func=command_list_folder_files)
 
     delete_document_parser = subparsers.add_parser(
@@ -8890,6 +9116,8 @@ def build_parser() -> argparse.ArgumentParser:
     pull_markdown_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     pull_markdown_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     pull_markdown_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    pull_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to export a document from one user's visible library.")
+    pull_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     pull_markdown_parser.set_defaults(func=command_pull_markdown)
 
     upload_media_parser = subparsers.add_parser(
@@ -8927,6 +9155,9 @@ def build_parser() -> argparse.ArgumentParser:
     append_markdown_parser.add_argument("--user-id-type", help="Optional user_id_type query value for block conversion and write requests.")
     append_markdown_parser.add_argument("--client-token", help="Optional UUIDv4 idempotency token for descendant block creation.")
     append_markdown_parser.add_argument("--show-converted-blocks", action="store_true", help="Include converted block payloads in the JSON output.")
+    append_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for the remote write. Use user to append with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
+    append_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    append_markdown_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before append-markdown performs a user-mode remote write.")
     append_markdown_parser.set_defaults(func=command_append_markdown)
 
     replace_markdown_parser = subparsers.add_parser(
@@ -8946,6 +9177,9 @@ def build_parser() -> argparse.ArgumentParser:
     replace_markdown_parser.add_argument("--user-id-type", help="Optional user_id_type query value for block conversion and write requests.")
     replace_markdown_parser.add_argument("--show-converted-blocks", action="store_true", help="Include converted block payloads in the JSON output.")
     replace_markdown_parser.add_argument("--confirm-replace", action="store_true", help="Required safety flag for destructive remote replacement.")
+    replace_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for the remote write. Use user to replace with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
+    replace_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    replace_markdown_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before replace-markdown performs a user-mode remote write.")
     replace_markdown_parser.set_defaults(func=command_replace_markdown)
 
     push_markdown_parser = subparsers.add_parser(
@@ -8964,6 +9198,10 @@ def build_parser() -> argparse.ArgumentParser:
     push_markdown_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     push_markdown_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     push_markdown_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    push_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for the remote write. Use user to push with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
+    push_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    push_markdown_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before push-markdown performs a user-mode remote write.")
+    push_markdown_parser.add_argument("--allow-user-create", action="store_true", help="With --auth-mode user, allow push-markdown to create a new remote doc when the local file is still unmapped.")
     push_markdown_parser.set_defaults(func=command_push_markdown)
 
     push_dir_parser = subparsers.add_parser(
@@ -8983,6 +9221,10 @@ def build_parser() -> argparse.ArgumentParser:
     push_dir_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     push_dir_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     push_dir_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    push_dir_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for directory writes. Use user to push within one user's visible drive.")
+    push_dir_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    push_dir_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before push-dir performs user-mode remote writes.")
+    push_dir_parser.add_argument("--allow-user-create", action="store_true", help="With --auth-mode user, allow push-dir to create new remote docs for unmapped local files.")
     push_dir_parser.set_defaults(func=command_push_dir)
 
     pull_dir_parser = subparsers.add_parser(
@@ -8990,7 +9232,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export every visible docx file under a Feishu folder tree into local Markdown files.",
     )
     pull_dir_parser.add_argument("path", help="Local output root directory.")
-    pull_dir_parser.add_argument("--folder-token", help="Optional starting folder token. Defaults to the resolved app-visible root folder.")
+    pull_dir_parser.add_argument("--folder-token", help="Optional starting folder token. Defaults to the resolved current token-visible root folder.")
     pull_dir_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
     pull_dir_parser.add_argument("--overwrite", action="store_true", help="Overwrite local Markdown files when they already exist.")
     pull_dir_parser.add_argument("--continue-on-error", action="store_true", help="Continue processing remaining remote docs after a failure.")
@@ -9005,11 +9247,13 @@ def build_parser() -> argparse.ArgumentParser:
     pull_dir_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     pull_dir_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     pull_dir_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    pull_dir_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for read-only access. Use user to export the visible folder tree for one user.")
+    pull_dir_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     pull_dir_parser.set_defaults(func=command_pull_dir, recursive=True)
 
     sync_dir_parser = subparsers.add_parser(
         "sync-dir",
-        help="Build a tenant-mode directory sync plan that combines local mappings with remote folder visibility.",
+        help="Build a directory sync plan that combines local mappings with remote folder visibility.",
     )
     sync_dir_parser.add_argument("path", help="Local Markdown sync root.")
     sync_dir_parser.add_argument("--folder-token", help="Optional starting remote folder token. Defaults to the app-visible root folder.")
@@ -9038,6 +9282,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync_dir_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
     sync_dir_parser.add_argument("--timeout", type=int, default=20, help="HTTP timeout in seconds. Defaults to 20.")
     sync_dir_parser.add_argument("--force-refresh", action="store_true", help="Ignore FEISHU_TENANT_ACCESS_TOKEN and fetch a new token from app credentials.")
+    sync_dir_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for planning or protected execution. Use user to inspect and sync one user's visible drive tree.")
+    sync_dir_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
+    sync_dir_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before sync-dir executes user-mode bidirectional remote writes.")
+    sync_dir_parser.add_argument("--allow-user-create", action="store_true", help="With --auth-mode user --execute-bidirectional --include-create-flow, allow sync-dir to create new remote docs for unmapped local bidirectional files.")
     sync_dir_parser.set_defaults(func=command_sync_dir, recursive=True)
 
     push_parser = subparsers.add_parser("plan-push", help="Plan a push for one Markdown file.")

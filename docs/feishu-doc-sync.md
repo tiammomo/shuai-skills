@@ -24,7 +24,7 @@
 当前进展并不完全对称：
 
 - `tenant` 模式已经有真实读写链路。
-- `user` 模式目前主要完成了授权 URL、授权码换 token、本地回调接码等认证基础设施；用户视角下的文档同步能力还在继续补。
+- `user` 模式现在已经有授权 URL、授权码换 token、本地回调接码，以及第一版用户视角读链路和受保护的单文档写链路；目录级写入和双向同步仍在继续补。
 
 ## 当前已实测能力
 
@@ -54,6 +54,28 @@
 - 将同步结果写回本地 `feishu-index.json`
 - 删除远程测试文档
 
+截至 2026-03-17，本仓库也已经补上第一版 user 能力：
+
+- `validate-user`
+- `get-document --auth-mode user`
+- `get-raw-content --auth-mode user`
+- `list-root-files --auth-mode user`
+- `list-folder-files --auth-mode user`
+- `pull-markdown --auth-mode user`
+- `pull-dir --auth-mode user`
+- `append-markdown --auth-mode user --confirm-user-write`
+- `replace-markdown --auth-mode user --confirm-user-write --confirm-replace`
+- `push-markdown --auth-mode user --confirm-user-write`
+- `push-markdown --auth-mode user --confirm-user-write --allow-user-create`
+- `push-dir --auth-mode user --confirm-user-write`
+- `push-dir --auth-mode user --confirm-user-write --allow-user-create`
+- `sync-dir --auth-mode user --dry-run`
+- `sync-dir --auth-mode user --dry-run --detect-conflicts`
+- `sync-dir --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write`
+- `sync-dir --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write --include-create-flow --allow-user-create`
+
+这意味着 user 模式已经不再只是“拿 token 的授权脚手架”，而是具备了第一批真正可执行的用户视角读取、导出和受保护单文档写入能力。
+
 这意味着 tenant 模式已经不只是“规划脚手架”，而是具备了第一批真实可执行的 Markdown 同步能力。
 
 ## 当前推荐使用路径
@@ -69,6 +91,7 @@
 
 - `tenant-token`
 - `validate-tenant`
+- `validate-user`
 - `create-document`
 - `get-document`
 - `get-raw-content`
@@ -89,7 +112,7 @@
 
 虽然 tenant 模式已经打通了第一条真实写入链路，但这还不是“全量完成”的飞书同步器。当前仍然存在这些明确边界：
 
-- user 模式还没有补齐用户视角的文档同步能力
+- user 模式现在已经支持受保护的单文档和目录级 `push-dir`，以及 user-visible 的 `sync-dir` dry-run / protected bidirectional execution；远程 prune delete 仍然保持 tenant-only
 - 高保真 pull/export 目前只覆盖常见 block，复杂表格、嵌入块和部分高级结构仍需继续补
 - 媒体上传已经可执行，但图片/附件到 Markdown 的自动回填还没有进入当前执行链路
 - 已经具备基于 sync baseline 的 drift / conflict detection，能给出语义级块预览、行级 diff 预览，以及基于 baseline 的语义 merge suggestion

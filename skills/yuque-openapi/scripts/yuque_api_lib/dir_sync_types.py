@@ -63,6 +63,8 @@ class SyncPlanItem(TypedDict, total=False):
     remote_hash: Optional[str]
     base_hash: Optional[str]
     remote_updated_at: Optional[str]
+    review: Dict[str, Any]
+    diff_preview: Dict[str, Any]
     operation: Optional[Dict[str, Any]]
     _local: Optional[LocalMarkdownRecord]
     _remote: Optional[RemoteMarkdownRecord]

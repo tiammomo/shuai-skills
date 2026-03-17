@@ -64,6 +64,7 @@ def main() -> int:
     if not args.skip_help_smoke:
         help_commands = [
             ("CLI help", [sys.executable, str(YUQUE_API), "--help"]),
+            ("Directory plan help", [sys.executable, str(YUQUE_API), "plan-dir-markdown", "--help"]),
             ("Manifest validate help", [sys.executable, str(YUQUE_API), "validate-manifest", "--help"]),
             ("Manifest help", [sys.executable, str(YUQUE_API), "run-manifest", "--help"]),
             ("Directory push help", [sys.executable, str(YUQUE_API), "push-dir-markdown", "--help"]),

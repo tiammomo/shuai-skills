@@ -21,6 +21,7 @@
 - `push-dir-markdown` executes only the `push` operations from a generated sync plan.
 - `pull-dir-markdown` executes only the `pull` operations from a generated sync plan.
 - `plan-dir-markdown` exposes `push`, `pull`, `skip`, and `conflict` items before anything is written.
+- `plan-dir-markdown --include-diff` also attaches `review` metadata for every plan item and truncated unified diff previews whenever both the local and remote markdown bodies exist and differ.
 - Existing doc identity comes from front matter first, then `yuque-index.json`.
 
 ## Command Patterns
@@ -28,6 +29,7 @@
 - `push-dir-markdown <repo> <source-dir>` recursively scans local `*.md` files and uploads only planned changes.
 - `pull-dir-markdown <repo> <output-dir>` recreates the remote hierarchy locally and always writes front matter plus `yuque-index.json`.
 - `plan-dir-markdown <repo> <root-dir>` emits a reviewable manifest and can persist it with `--write-manifest`.
+- `plan-dir-markdown <repo> <root-dir> --include-diff --diff-max-lines 80` adds review summaries plus capped diff previews for manual conflict review or batch approval.
 - `push-dir-markdown --sync-toc` first performs the planned uploads, then rewrites the remote TOC from the local tree.
 
 ## Path And Identity Rules
@@ -49,10 +51,13 @@
 - If only the remote side changed since the base, the plan emits `pull`.
 - If both sides changed since the base, the plan emits `conflict`.
 - If local and remote hashes already match, the plan emits `skip`.
+- Every plan item now also carries a `review.recommended_action` summary so large directory plans can be triaged without reverse-engineering each status.
+- With `--include-diff`, comparable items include a truncated unified diff preview with `local:<relative_path>` and `yuque:<slug-or-id>` headers.
 
 ## Output And Index Files
 
 - `push-dir-markdown` and `pull-dir-markdown` both refresh `<root>/yuque-index.json`.
 - Each index entry keeps `relative_path`, `doc_id`, `doc_slug`, `title`, `public`, `format`, `updated_at`, `content_hash`, and `last_sync_at`.
 - `plan-dir-markdown --write-manifest sync-plan.json` writes an object with an `operations` array ready for `run-manifest`.
+- `plan-dir-markdown` also reports `meta.review` counts so review-heavy runs can see how many items are ready to push, ready to pull, or still need manual attention.
 - The plan preview paths follow the same default title-based hierarchy as `pull-dir-markdown`, so review output matches the eventual local tree.

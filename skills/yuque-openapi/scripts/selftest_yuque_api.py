@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -112,6 +113,11 @@ def assert_true(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def hash_markdown_body(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def test_plan_dir_markdown_writes_manifest() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "docs"
@@ -130,6 +136,77 @@ def test_plan_dir_markdown_writes_manifest() -> None:
         assert_true(result["meta"]["summary"]["push"] == 1, "Expected one push item in the generated plan.")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         assert_true(manifest["operations"][0]["command"] == "push-markdown", "Manifest should contain a push-markdown operation.")
+
+
+def test_plan_dir_markdown_includes_review_diff_preview() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "docs"
+        root.mkdir()
+        local_body = "# Guide\n\nLocal paragraph.\n"
+        (root / "guide.md").write_text(
+            "---\n"
+            "yuque_doc_id: 11\n"
+            "yuque_doc_slug: guide\n"
+            "title: Guide\n"
+            "---\n"
+            "\n"
+            f"{local_body}",
+            encoding="utf-8",
+        )
+        (root / "yuque-index.json").write_text(
+            json.dumps(
+                {
+                    "repo": "demo/repo",
+                    "docs": [
+                        {
+                            "relative_path": "guide.md",
+                            "doc_id": "11",
+                            "doc_slug": "guide",
+                            "title": "Guide",
+                            "content_hash": hash_markdown_body("# Guide\n\nShared baseline.\n"),
+                        }
+                    ],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        args = yuque_api.namespace_from_operation(
+            {
+                "command": "plan-dir-markdown",
+                "repo": "demo/repo",
+                "root_dir": str(root),
+                "include_diff": True,
+                "diff_max_lines": 12,
+            }
+        )
+        result = yuque_api.perform_command(
+            FakeYuqueClient(
+                docs=[
+                    {
+                        "id": 11,
+                        "slug": "guide",
+                        "title": "Guide",
+                        "body": "# Guide\n\nRemote paragraph.\n",
+                        "updated_at": "2026-03-14T00:08:00Z",
+                    }
+                ]
+            ),
+            args,
+        )
+        assert_true(result["meta"]["summary"]["conflict"] == 1, "Expected one conflict item in the review-heavy plan.")
+        review_meta = result["meta"]["review"]
+        assert_true(review_meta["manual_review_count"] == 1, "Expected one manual-review item in the review summary.")
+        assert_true(review_meta["diff_generated_count"] == 1, "Expected the diff preview to be generated.")
+        item = result["data"][0]
+        assert_true(item["review"]["recommended_action"] == "manual_review", "Expected the conflict item to recommend manual review.")
+        diff_preview = item.get("diff_preview") or {}
+        assert_true(diff_preview.get("format") == "unified_diff", "Expected a unified diff preview for the conflict item.")
+        preview_text = str(diff_preview.get("preview") or "")
+        assert_true("--- local:guide.md" in preview_text, "Expected the diff preview to include the local file header.")
+        assert_true("+++ yuque:guide" in preview_text, "Expected the diff preview to include the remote doc header.")
+        assert_true("Local paragraph." in preview_text and "Remote paragraph." in preview_text, "Expected the diff preview to include the changed local and remote lines.")
 
 
 def test_push_dir_markdown_sync_toc_creates_backup() -> None:
@@ -356,6 +433,7 @@ def test_restore_repo_snapshot_dry_run_previews_without_writes() -> None:
 def main() -> int:
     tests = [
         ("plan-dir-markdown", test_plan_dir_markdown_writes_manifest),
+        ("plan-dir-markdown --include-diff", test_plan_dir_markdown_includes_review_diff_preview),
         ("push-dir-markdown --sync-toc", test_push_dir_markdown_sync_toc_creates_backup),
         ("validate-manifest", test_validate_manifest_rejects_missing_required_fields),
         ("run-manifest", test_run_manifest_continue_on_error),

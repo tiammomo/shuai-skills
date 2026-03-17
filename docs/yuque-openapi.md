@@ -114,6 +114,7 @@
 相关命令包括：
 
 - `plan-dir-markdown`
+- `plan-dir-markdown --include-diff`
 - `push-dir-markdown`
 - `pull-dir-markdown`
 - `export-repo-markdown`
@@ -133,6 +134,7 @@
 - `yuque-index.json` 不只是一个导出清单，而是目录级同步的状态文件，会记录 `relative_path`、`doc_id`、`doc_slug`、`title`、`public`、`format`、`content_hash`、`last_sync_at` 等字段。
 - 读取索引时会兼容 `docs` 和 `files` 两种入口字段，也会对绝对路径和相对路径做归一化处理。
 - `plan-dir-markdown` 生成的不是抽象建议，而是带 `operations` 数组的可执行计划，必要时还能直接落成 manifest JSON。
+- `plan-dir-markdown --include-diff` 会给可比较的计划项附上 `review` 摘要和截断版 unified diff，适合批量审查冲突或确认 push/pull 方向。
 - 当索引里已有 `content_hash` 时，会做近似三方比较，判断是本地改了、远程改了，还是两边都改了。
 - `pull-dir-markdown` 会优先复用索引和 front matter 中的映射，其次才按远程 TOC 推导路径，因此重复拉取时不容易把本地路径抖乱。
 - 按 TOC 还原层级时，带子文档的父节点会落成 `<parent>/index.md`，叶子节点会落成 `<name>.md`。
@@ -250,7 +252,7 @@ Manifest 批量任务还有几条实现细节：
 
 这个 skill 已经带了一套基础校验能力，适合在继续扩展时做回归检查：
 
-- `scripts/selftest_yuque_api.py` 覆盖了目录计划写 manifest、`push-dir-markdown --sync-toc` 自动备份、manifest 容错执行、prune guard、快照恢复和 dry-run 等关键路径。
+- `scripts/selftest_yuque_api.py` 覆盖了目录计划写 manifest、diff preview、`push-dir-markdown --sync-toc` 自动备份、manifest 容错执行、prune guard、快照恢复和 dry-run 等关键路径。
 - `scripts/check_yuque_skill.py` 可以一键串联离线自测、skill 校验和 CLI 帮助 smoke test。
 - 这意味着当前文档中提到的核心工作流，大多已经有对应的最小验证，而不是纯概念描述。
 

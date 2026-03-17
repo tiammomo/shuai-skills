@@ -87,6 +87,8 @@ def _execute_directional_sync(
 
 def handle_plan_dir_markdown(client: YuqueClient, args: argparse.Namespace) -> Any:
     root_dir = Path(args.root_dir)
+    if int(args.diff_max_lines) <= 0:
+        raise YuqueApiError("--diff-max-lines must be a positive integer.")
     plan, _state = build_dir_sync_plan(
         client,
         repo_ref=args.repo,
@@ -97,6 +99,8 @@ def handle_plan_dir_markdown(client: YuqueClient, args: argparse.Namespace) -> A
         flat=args.flat,
         default_public=None,
         lookup_by="auto",
+        include_diff=args.include_diff,
+        diff_max_lines=args.diff_max_lines,
     )
     if args.write_manifest:
         manifest_path = Path(args.write_manifest)
@@ -256,6 +260,8 @@ def configure_plan_dir_markdown(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--slug-source", choices=("path", "stem"), default="path", help="How to derive slugs for brand-new docs without an existing mapping. Defaults to path.")
     parser.add_argument("--flat", action="store_true", help="Ignore Yuque TOC nesting and build flat fallback paths under the root directory.")
     parser.add_argument("--write-manifest", help="Optional path to write the generated sync manifest JSON.")
+    parser.add_argument("--include-diff", action="store_true", help="Attach truncated unified diff previews for plan items whose local and remote markdown bodies both exist and differ.")
+    parser.add_argument("--diff-max-lines", type=int, default=80, help="Maximum preview lines per diff when --include-diff is enabled. Defaults to 80.")
 
 
 def configure_sync_dir_toc(parser: argparse.ArgumentParser) -> None:
@@ -280,7 +286,7 @@ def configure_restore_repo_snapshot(parser: argparse.ArgumentParser) -> None:
 
 def build_sync_command_specs(dispatch_operation: OperationDispatcher) -> Tuple[CommandSpec, ...]:
     return (
-        CommandSpec("plan-dir-markdown", "Build a bidirectional incremental sync manifest for a repo and local markdown directory.", handle_plan_dir_markdown, configure_plan_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "slug_source": "path", "flat": False, "write_manifest": None}),
+    CommandSpec("plan-dir-markdown", "Build a bidirectional incremental sync manifest for a repo and local markdown directory.", handle_plan_dir_markdown, configure_plan_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "slug_source": "path", "flat": False, "write_manifest": None, "include_diff": False, "diff_max_lines": 80}),
         CommandSpec("sync-dir-toc", "Rewrite a Yuque repo TOC from a local markdown directory tree.", handle_sync_dir_toc, configure_sync_dir_toc, {"index_file": DEFAULT_INDEX_FILE, "write_toc_file": None, "allow_prune": False, "backup_dir": None, "skip_backup": False}),
         CommandSpec("restore-repo-snapshot", "Restore docs and/or TOC from an automatic repo snapshot.", handle_restore_repo_snapshot, configure_restore_repo_snapshot, {"repo": None, "allow_repo_override": False, "skip_docs": False, "skip_toc": False, "dry_run": False, "write_toc_file": None}),
         CommandSpec("pull-dir-markdown", "Sync a Yuque repo into a local markdown directory, preserving known structure.", lambda client, args: handle_pull_dir_markdown(client, args, dispatch_operation=dispatch_operation), configure_pull_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "flat": False}),

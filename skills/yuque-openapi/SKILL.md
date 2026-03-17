@@ -23,7 +23,7 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 - Sync one markdown file to or from Yuque:
   Use `push-markdown` or `pull-markdown`, then read [references/repo-doc-crud.md](./references/repo-doc-crud.md) if payload or lookup rules matter.
 - Sync a whole markdown directory with a repo:
-  Start with `plan-dir-markdown`, then read [references/dir-sync.md](./references/dir-sync.md).
+  Start with `plan-dir-markdown`; add `--include-diff` when the review output should also show truncated unified diffs for divergent local vs remote markdown bodies, then read [references/dir-sync.md](./references/dir-sync.md).
 - Rebuild only the remote hierarchy or TOC:
   Use `sync-dir-toc` or `push-dir-markdown --sync-toc`, then read [references/toc-sync.md](./references/toc-sync.md).
 - Restore a repo from an automatic snapshot:
@@ -51,7 +51,7 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 
 - [references/endpoints.md](./references/endpoints.md): reference index and command-family routing.
 - [references/repo-doc-crud.md](./references/repo-doc-crud.md): space discovery, repo/doc CRUD, payload shapes, file-level markdown sync.
-- [references/dir-sync.md](./references/dir-sync.md): directory sync planning, path rules, conflict rules, and `yuque-index.json`.
+- [references/dir-sync.md](./references/dir-sync.md): directory sync planning, path rules, conflict rules, review previews, and `yuque-index.json`.
 - [references/toc-sync.md](./references/toc-sync.md): TOC markdown shape, prune guard, and automatic snapshot behavior.
 - [references/manifest.md](./references/manifest.md): manifest schema, batch execution rules, and output patterns.
 - [references/troubleshooting.md](./references/troubleshooting.md): common failure modes, prune guard behavior, and recovery guidance.
@@ -59,7 +59,7 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 ## Bundled Resources
 
 - `scripts/yuque_api.py`: stable cross-platform CLI entrypoint.
-- `scripts/selftest_yuque_api.py`: offline regression checks for planning, manifest execution, TOC sync, and backup protections.
-- `scripts/check_yuque_skill.py`: one-click local check runner for selftests, skill validation, and CLI help smoke tests. It exits non-zero on failures, so it is ready to wire into CI later.
+- `scripts/selftest_yuque_api.py`: offline regression checks for planning, diff previews, manifest execution, TOC sync, and backup protections.
+- `scripts/check_yuque_skill.py`: one-click local check runner for selftests, skill validation, and CLI help smoke tests. It exits non-zero on failures, so it is ready to wire into CI.
 - `scripts/yuque_api_lib/`: implementation modules for the CLI. Read only when patching or debugging the skill itself.
 - `assets/manifests/`: starter manifest templates for common pull, push, and export workflows.

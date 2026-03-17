@@ -53,12 +53,21 @@
 
 ## 当前已有 Skills
 
-截至 2026-03-15，这个仓库已经有两个方向明确、可直接继续扩展的真实 skill：
+截至 2026-03-17，这个仓库已经有两个方向明确、可直接继续扩展的真实 skill：
 
 | Skill | 主要平台 | 当前状态 | 代表能力 | 仓库级文档 |
 | --- | --- | --- | --- | --- |
 | `yuque-openapi` | 语雀 | 较成熟 | 单文档推送/拉取、目录级增量同步、TOC 重建、快照恢复、批量 manifest、Repo/Doc CRUD、原始 API 调用 | [docs/yuque-openapi.md](./docs/yuque-openapi.md) |
-| `feishu-doc-sync` | 飞书云文档 | tenant 模式已实测写通，user 模式仍在继续补齐 | tenant token 鉴权、建文档、读元数据、读纯文本、列根目录、追加 Markdown、替换文档正文、单文件 push、目录级 push、`feishu-index.json` 回写 | [docs/feishu-doc-sync.md](./docs/feishu-doc-sync.md) |
+| `feishu-doc-sync` | 飞书云文档 | tenant / user 主链路已可用，仍在持续增强 | tenant/user 鉴权、单文档读写、目录级 push/pull、`sync-dir` dry-run / conflict detection / protected bidirectional execution / prune、`feishu-index.json` 回写 | [docs/feishu-doc-sync.md](./docs/feishu-doc-sync.md) |
+
+## 仓库级检查
+
+当前仓库已经把两个业务 skill 的离线检查固定成统一入口，并新增了 GitHub Actions 工作流自动跑：
+
+- `python skills/feishu-doc-sync/scripts/check_feishu_skill.py`
+- `python skills/yuque-openapi/scripts/check_yuque_skill.py`
+
+在 GitHub Actions 里，这两个检查会以 `--skip-validate` 运行，避免依赖本地 `skill-creator` 校验脚本路径，同时保留 smoke/selftest 与 CLI help 回归。
 
 ## 如何选择 Skill
 
@@ -94,18 +103,25 @@
 
 ### `feishu-doc-sync`
 
-这是面向飞书云文档的同步型 skill，当前重点放在本地 Markdown 与飞书 docx 文档之间的 tenant 模式同步能力建设。
+这是面向飞书云文档的同步型 skill，当前重点放在本地 Markdown 与飞书 docx 文档之间的 tenant / user 双模式同步能力建设。
 
-截至 2026-03-15，本仓库已经实测打通了：
+截至 2026-03-17，本仓库已经实测打通了：
 
-- `tenant_access_token` 鉴权
+- `tenant_access_token` / `user_access_token` 鉴权
 - 创建文档
 - 读取文档元数据与纯文本内容
 - 列出 app 可见根目录文件
+- 列出 user 可见根目录与目录树
 - 追加 Markdown 到远程文档
 - 替换远程文档正文
 - 单文件 `push-markdown`
 - 目录级 `push-dir`
+- 目录级 `pull-dir`
+- 目录级 `sync-dir --dry-run`
+- 目录级 `sync-dir --dry-run --detect-conflicts --include-diff`
+- 目录级 `sync-dir --execute-bidirectional --confirm-bidirectional`
+- 目录级 `sync-dir --prune --confirm-prune`
+- user 模式受保护的单文档与目录级 push / bidirectional sync
 - `feishu-index.json` 自动回写
 
 想继续看：

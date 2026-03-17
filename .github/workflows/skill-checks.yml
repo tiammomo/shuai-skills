@@ -1,0 +1,31 @@
+name: Skill Checks
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: feishu-doc-sync
+            command: python skills/feishu-doc-sync/scripts/check_feishu_skill.py --skip-validate
+          - name: yuque-openapi
+            command: python skills/yuque-openapi/scripts/check_yuque_skill.py --skip-validate
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run ${{ matrix.name }} checks
+        run: ${{ matrix.command }}

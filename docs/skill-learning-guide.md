@@ -163,6 +163,10 @@ python skills/my-skill/scripts/check_my_skill.py
 - 长而按需：放进 `references/`
 - 稳定执行：放进 `scripts/`
 
+如果你想把“用户原话、任务类型、路由入口、reference/script 规划、回归入口”一次性整理成可复制的设计表，直接用这份模板：
+
+- [skill-design-template.md](./skill-design-template.md)
+
 ## 构建时最容易踩的坑
 
 最常见的坑基本就这几类：

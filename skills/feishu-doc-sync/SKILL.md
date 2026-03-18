@@ -1,11 +1,11 @@
 ---
 name: feishu-doc-sync
-description: Live workflow for validating and syncing local Markdown with Feishu cloud documents. Use when Codex needs to inspect Feishu auth and scopes, map `.md` files to Feishu docx documents, append or replace Markdown in tenant-visible docs, upload document media, write back `feishu-index.json`, mirror local directory trees into remote Feishu folders during directory pushes, run selectable-fidelity pull/export planning, or continue extending the bundled Feishu sync skill.
+description: Live workflow for validating and syncing local Markdown with Feishu cloud documents. Use when Codex needs to inspect Feishu auth and scopes, map `.md` files to Feishu docx documents, append or replace Markdown in tenant-visible docs, upload document media, backfill standalone local media refs during writes, write back auth-mode-aware Feishu index files, mirror local directory trees into remote Feishu folders during directory pushes, run selectable-fidelity pull/export planning, or continue extending the bundled Feishu sync skill.
 ---
 
 # Feishu Doc Sync
 
-Use the bundled Python CLI to inspect prerequisites, validate live auth and docx connectivity, and execute the current Feishu Markdown sync path. The current repo version can already fetch tenant tokens, create or inspect docs, read raw content, append Markdown, replace document body content, upload media into docx contexts, push one file, push a directory, mirror local folders into remote Feishu folders for new docs, pull low- or high-fidelity Markdown exports, write back `feishu-index.json`, run user-mode validation or exports with `user_access_token`, execute protected single-document user-mode append, replace, or push flows, and execute protected directory-level user-mode `push-dir` or `sync-dir` bidirectional runs.
+Use the bundled Python CLI to inspect prerequisites, validate live auth and docx connectivity, and execute the current Feishu Markdown sync path. The current repo version can already fetch tenant tokens, create or inspect docs, read raw content, append Markdown, replace document body content, upload media into docx contexts, backfill standalone local Markdown image or attachment lines during writes, push one file, push a directory, mirror local folders into remote Feishu folders for new docs, pull low- or high-fidelity Markdown exports with stronger table/callout coverage, write back auth-mode-aware index files, run user-mode validation or exports with `user_access_token`, execute protected single-document user-mode append, replace, or push flows, and execute protected directory-level user-mode `push-dir` or `sync-dir` bidirectional runs.
 
 ## Safety First
 
@@ -15,6 +15,13 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 - Do not assume API scope approval is enough. Feishu doc access also requires the app or user to be granted access to the target document.
 - For tenant-level automation, confirm the app has been added to each target document or folder before attempting writes.
 - Keep destructive overwrite or remote delete logic behind explicit user confirmation when extending this scaffold.
+
+## Progressive Loading
+
+- Stay in this file for routing, safety, and command selection.
+- Read only the single `references/*.md` file that matches the task at hand; load a second reference only when one run truly spans both topics.
+- Load only `scripts/feishu_doc_sync.py` or `scripts/check_feishu_skill.py` when you need to execute, patch, or debug the implementation.
+- Do not preload every Feishu reference file just because the skill triggered. Pick the narrowest auth, sync, export, or conflict guide first.
 
 ## Task Router
 
@@ -34,9 +41,9 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
   Use `python scripts/feishu_doc_sync.py push-dir <dir> --auth-mode user --confirm-user-write`; add `--allow-user-create` only when unmapped local files should create new user-visible docs. For planning, use `python scripts/feishu_doc_sync.py sync-dir <dir> --auth-mode user --dry-run`; for protected bidirectional execution, add `--execute-bidirectional --confirm-bidirectional --confirm-user-write`, then read [references/user-mode.md](./references/user-mode.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
 - Append or replace Markdown in one existing tenant-visible doc:
   Use `python scripts/feishu_doc_sync.py append-markdown` or `replace-markdown`, then read [references/tenant-mode.md](./references/tenant-mode.md) and [references/sync-rules.md](./references/sync-rules.md).
-- Push one local Markdown file and update `feishu-index.json`:
+- Push one local Markdown file and update the current auth-mode index:
   Use `python scripts/feishu_doc_sync.py push-markdown <file>`, then read [references/sync-rules.md](./references/sync-rules.md).
-- Push a whole Markdown directory and update `feishu-index.json`:
+- Push a whole Markdown directory and update the current auth-mode index:
   Use `python scripts/feishu_doc_sync.py push-dir <dir>`; add `--mirror-remote-folders` when new docs should inherit a remote folder tree derived from the local directory layout, then read [references/sync-rules.md](./references/sync-rules.md).
 - Pull one Feishu document into local Markdown:
   Use `python scripts/feishu_doc_sync.py pull-markdown <doc>`; add `--fidelity high` when common block types should be rebuilt from the Feishu block tree, then read [references/pull-export.md](./references/pull-export.md) and [references/sync-rules.md](./references/sync-rules.md).
@@ -44,6 +51,8 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
   Use `python scripts/feishu_doc_sync.py pull-dir <dir>`; add `--fidelity high` for block-tree exports, then read [references/pull-export.md](./references/pull-export.md).
 - Upload one local image or attachment into a Feishu document workflow:
   Use `python scripts/feishu_doc_sync.py upload-media <doc> <path>`, then read [references/markdown-mapping.md](./references/markdown-mapping.md) and [references/tenant-mode.md](./references/tenant-mode.md).
+- Backfill standalone local media references during a Markdown write:
+  Use `python scripts/feishu_doc_sync.py append-markdown`, `replace-markdown`, `push-markdown`, or `push-dir` with `--upload-media`; add `--media-root` when relative asset paths should resolve from a shared directory instead of the Markdown file location, then read [references/markdown-mapping.md](./references/markdown-mapping.md).
 - Build a directory sync dry-run before any destructive tenant sync extension:
   Use `python scripts/feishu_doc_sync.py sync-dir <dir> --dry-run`; add `--detect-conflicts` when mapped docs should be classified for local drift, remote drift, and review-required conflicts, and add `--include-diff` when the dry-run should also attach semantic block previews plus truncated local-vs-remote line diffs. `local_and_remote_changed` items now also carry a baseline-aware semantic merge suggestion when the index has a reusable body snapshot, then read [references/pull-export.md](./references/pull-export.md), [references/sync-rules.md](./references/sync-rules.md), and [references/conflict-rules.md](./references/conflict-rules.md).
 - Execute protected bidirectional sync for already mapped clean bidirectional files:
@@ -68,14 +77,14 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 1. Run `python scripts/feishu_doc_sync.py doctor`.
 2. Choose the identity model first: app-visible sync via `tenant_access_token`, or user-visible sync via `user_access_token`.
 3. Validate the chosen auth path and confirm the app or user can access the target docs.
-4. Add front matter or `feishu-index.json` mappings locally.
+4. Add front matter or the current auth-mode index mappings locally.
 5. Generate a single-file or directory plan before running live sync.
 6. For one remote document export, use `pull-markdown`; add `--auth-mode user` when the export should follow one user's document visibility.
 7. For one file push, use `push-markdown`.
 8. For one existing document body overwrite, use `replace-markdown` with `--confirm-replace`.
 9. For one directory, use `pull-dir`, `push-dir`, `push-dir --mirror-remote-folders`, `sync-dir --dry-run`, `sync-dir --dry-run --detect-conflicts --include-diff`, `sync-dir --execute-bidirectional --confirm-bidirectional`, or `sync-dir --prune --confirm-prune` depending on whether you are exporting, writing, mirroring the local folder tree, planning, reviewing semantic drift previews, executing protected bidirectional sync, or pruning remote docs with backups.
 10. Treat `--allow-auto-merge`, `--adopt-remote-new`, and `--include-create-flow` as opt-in expansion switches on top of the protected bidirectional path, not as default behavior.
-11. Extend richer block coverage, automatic media round-tripping, semantic conflict resolution, and rename/move/delete propagation only after the current tenant-mode mapping, protected execution, and user/tenant permission models are stable.
+11. Extend broader inline-media round-tripping, richer block coverage, semantic conflict resolution, and rename/move/delete propagation only after the current tenant-mode mapping, protected execution, and user/tenant permission models are stable.
 
 ## Reference Files
 
@@ -92,5 +101,5 @@ Use the bundled Python CLI to inspect prerequisites, validate live auth and docx
 
 ## Bundled Resources
 
-- `scripts/feishu_doc_sync.py`: CLI for auth validation, tenant-mode doc read/write operations, protected single-document plus directory-level user-mode validate/list/pull/write flows, explicit doc-media upload, folder-aware `push-dir`, selectable-fidelity pull/export, sync-dir prune execution with backups, semantic conflict dry-runs with optional diff previews plus merge suggestions, protected bidirectional execution, and local planning flows.
+- `scripts/feishu_doc_sync.py`: CLI for auth validation, tenant-mode doc read/write operations, protected single-document plus directory-level user-mode validate/list/pull/write flows, explicit doc-media upload, standalone media backfill during writes, folder-aware `push-dir`, selectable-fidelity pull/export, sync-dir prune execution with backups, semantic conflict dry-runs with optional diff previews plus merge suggestions, protected bidirectional execution, and local planning flows.
 - `scripts/check_feishu_skill.py`: local smoke check for the scaffold.

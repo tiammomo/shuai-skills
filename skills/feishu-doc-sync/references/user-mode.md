@@ -1,5 +1,16 @@
 # User Mode
 
+## Contents
+
+- [What This Mode Means](#what-this-mode-means)
+- [What The User Token Can Represent](#what-the-user-token-can-represent)
+- [Current Capability In This Repo](#current-capability-in-this-repo)
+- [Recommended Workflow](#recommended-workflow)
+- [Best Fit](#best-fit)
+- [Limits](#limits)
+- [Commands To Start With](#commands-to-start-with)
+- [Related Docs](#related-docs)
+
 ## What This Mode Means
 
 User mode uses `user_access_token`, so the app acts with one specific Feishu user's identity.
@@ -47,6 +58,8 @@ This repo now supports the auth side of user mode plus protected single-document
 
 That means the scaffold can now obtain `user_access_token`, validate user-visible connectivity, inspect user-visible docs, export user-visible Markdown, and perform protected single-document or directory-level writes as that user.
 
+When user-mode commands write local mappings, they now default to `feishu-index.user.json` so one user's visible mappings do not overwrite tenant-visible mappings in the same tree. If only a legacy unscoped `feishu-index.json` exists, user-mode planning can still read it as a migration fallback and will then write the refreshed mappings into `feishu-index.user.json`.
+
 So the current status is:
 
 - user auth flow: scaffolded
@@ -54,6 +67,7 @@ So the current status is:
 - user-token-based document listing and export: supported
 - user-token-based single-document append/replace/push: supported behind explicit confirmation flags
 - user-token-based directory push: supported behind `--confirm-user-write`
+- user-token-based standalone media backfill: supported behind `--upload-media` for append, replace, `push-markdown`, and `push-dir`
 - user-token-based sync-dir dry-run and conflict review: supported
 - user-token-based protected bidirectional sync execution: supported for mapped docs, opt-in create flow, and user-visible pull candidates
 - user-token-based prune delete: still tenant-only
@@ -69,10 +83,11 @@ So the current status is:
 7. Run `validate-user` before the first real read to confirm the token can see the target doc.
 8. Use `get-document`, `list-root-files`, `pull-markdown`, or `pull-dir` with `--auth-mode user` for user-visible reads and exports.
 9. For one protected write, use `append-markdown`, `replace-markdown`, or `push-markdown` with `--auth-mode user --confirm-user-write`.
-10. For one directory push, use `push-dir --auth-mode user --confirm-user-write`; add `--allow-user-create` only when unmapped local files should create new user-visible remote docs.
-11. For one directory plan, use `sync-dir --auth-mode user --dry-run`; add `--detect-conflicts` when mapped docs should be classified for drift and review.
-12. For protected bidirectional execution, use `sync-dir --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write`.
-13. Keep `--confirm-replace` for destructive replacements, and add `--allow-user-create` only when an unmapped local file should create a new user-visible remote doc.
+10. Add `--upload-media` when standalone local Markdown image or attachment lines should be uploaded and inserted as Feishu image or file blocks under the current user-visible document.
+11. For one directory push, use `push-dir --auth-mode user --confirm-user-write`; add `--allow-user-create` only when unmapped local files should create new user-visible remote docs.
+12. For one directory plan, use `sync-dir --auth-mode user --dry-run`; add `--detect-conflicts` when mapped docs should be classified for drift and review.
+13. For protected bidirectional execution, use `sync-dir --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write`.
+14. Keep `--confirm-replace` for destructive replacements, and add `--allow-user-create` only when an unmapped local file should create a new user-visible remote doc.
 
 ## Best Fit
 
@@ -93,6 +108,7 @@ User mode is the better choice when:
 - `push-dir --auth-mode user` also defaults to updating already mapped docs unless `--allow-user-create` is present.
 - `sync-dir --auth-mode user --execute-bidirectional` still requires both `--confirm-bidirectional` and `--confirm-user-write`.
 - `sync-dir --auth-mode user --include-create-flow` still requires explicit `--allow-user-create`.
+- If you intentionally share one explicit index path across modes, add `auth_mode` metadata first or move the user-visible mappings into `feishu-index.user.json` before running mixed tenant and user syncs.
 
 ## Commands To Start With
 
@@ -114,8 +130,8 @@ python scripts/feishu_doc_sync.py validate-user --document-id doxxxxxxxxxxxxxxxx
 python scripts/feishu_doc_sync.py list-root-files --auth-mode user
 python scripts/feishu_doc_sync.py pull-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user --root ./exports
 python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --auth-mode user --confirm-user-write --confirm-replace --content "# Updated"
-python scripts/feishu_doc_sync.py push-markdown ./notes.md --auth-mode user --confirm-user-write --confirm-replace
-python scripts/feishu_doc_sync.py push-dir ./notes --auth-mode user --confirm-user-write --confirm-replace
+python scripts/feishu_doc_sync.py push-markdown ./notes.md --auth-mode user --confirm-user-write --confirm-replace --upload-media
+python scripts/feishu_doc_sync.py push-dir ./notes --auth-mode user --confirm-user-write --confirm-replace --upload-media
 python scripts/feishu_doc_sync.py sync-dir ./notes --auth-mode user --dry-run --detect-conflicts
 python scripts/feishu_doc_sync.py sync-dir ./notes --auth-mode user --execute-bidirectional --confirm-bidirectional --confirm-user-write
 ```

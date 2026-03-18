@@ -39,6 +39,7 @@ from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 INDEX_FILENAME = "feishu-index.json"
+USER_INDEX_FILENAME = "feishu-index.user.json"
 SYNC_BACKUP_DIRNAME = ".feishu-sync-backups"
 REQUIRED_ENV = ("FEISHU_APP_ID", "FEISHU_APP_SECRET")
 OPTIONAL_TOKEN_ENV = (
@@ -50,6 +51,21 @@ OPTIONAL_ENV = ("FEISHU_BASE_URL", "FEISHU_REDIRECT_URI")
 VALID_SYNC_DIRECTIONS = {"push", "pull", "bidirectional"}
 AUTH_MODE_CHOICES = ("tenant", "user")
 SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", ".feishu-sync-backups"}
+IMAGE_FILE_SUFFIXES = {
+    ".apng",
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".heic",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+REMOTE_MEDIA_SCHEMES = {"data", "feishu-file", "feishu-media", "ftp", "ftps", "http", "https", "mailto"}
 
 RECOMMENDED_SCOPES = {
     "write_docx": ["docx:document"],
@@ -1410,6 +1426,79 @@ def render_high_fidelity_markdown(
     unsupported_blocks: List[Dict[str, Any]] = []
     visited: set[str] = set()
 
+    def escape_table_cell(value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return " "
+        return normalized.replace("|", r"\|").replace("\n", "<br>")
+
+    def render_callout_lines(text: str, child_ids: List[str], depth: int) -> List[str]:
+        lines: List[str] = ["> [!CALLOUT]"]
+        callout_lines = text.splitlines() if text else []
+        if not callout_lines and not child_ids:
+            callout_lines = [""]
+        for line in callout_lines:
+            lines.append("> " + line if line else ">")
+        for child_id in child_ids:
+            for line in render_child_block(child_id, depth + 1):
+                lines.append("> " + line if line else ">")
+        return lines
+
+    def render_table_lines(payload: Dict[str, Any], child_ids: List[str]) -> Optional[List[str]]:
+        property_payload = payload.get("property")
+        if not isinstance(property_payload, dict):
+            property_payload = {}
+        row_size = int(property_payload.get("row_size") or 0)
+        column_size = int(property_payload.get("column_size") or 0)
+        cell_ids = [
+            str(cell_id)
+            for cell_id in payload.get("cells", [])
+            if isinstance(cell_id, str) and cell_id
+        ] or list(child_ids)
+
+        if row_size <= 0 and column_size > 0 and cell_ids:
+            row_size = (len(cell_ids) + column_size - 1) // column_size
+        if column_size <= 0 and row_size > 0 and cell_ids:
+            column_size = max(1, (len(cell_ids) + row_size - 1) // row_size)
+        if row_size <= 0 or column_size <= 0:
+            return None
+
+        rows: List[List[str]] = []
+        for row_index in range(row_size):
+            row_cells: List[str] = []
+            for column_index in range(column_size):
+                cell_index = row_index * column_size + column_index
+                cell_id = cell_ids[cell_index] if cell_index < len(cell_ids) else None
+                row_cells.append(render_table_cell(cell_id))
+            rows.append(row_cells)
+
+        header = rows[0] if rows else [" " for _ in range(column_size)]
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join("---" for _ in range(column_size)) + " |",
+        ]
+        for row in rows[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return lines
+
+    def render_table_cell(cell_block_id: Optional[str]) -> str:
+        if not cell_block_id:
+            return " "
+        cell_block = block_map.get(cell_block_id)
+        if not isinstance(cell_block, dict):
+            return " "
+        fragments: List[str] = []
+        for child_id in [
+            str(child_id)
+            for child_id in cell_block.get("children", [])
+            if isinstance(child_id, str) and child_id
+        ]:
+            rendered_lines = render_child_block(child_id, 0)
+            fragment = "\n".join(line for line in rendered_lines if line is not None).strip()
+            if fragment:
+                fragments.append(fragment)
+        return escape_table_cell("<br>".join(fragments))
+
     def render_child_block(block_id: str, depth: int = 0) -> List[str]:
         if block_id in visited:
             return [f"<!-- cycle detected for block {block_id} -->"]
@@ -1462,7 +1551,13 @@ def render_high_fidelity_markdown(
             return [("  " * depth) + f"- [{marker}] " + text]
         if payload_key == "image":
             token = str(payload.get("token") or payload.get("file_token") or "")
-            alt = str(payload.get("title") or payload.get("alt") or "image")
+            caption_payload = payload.get("caption")
+            caption = (
+                str(caption_payload.get("content") or "")
+                if isinstance(caption_payload, dict)
+                else ""
+            )
+            alt = str(payload.get("title") or payload.get("alt") or caption or "image")
             url = str(payload.get("url") or "")
             target = url or (f"feishu-media:{token}" if token else "feishu-media")
             return [f"![{alt}]({target})"]
@@ -1473,8 +1568,12 @@ def render_high_fidelity_markdown(
         if payload_key == "divider":
             return ["---"]
         if payload_key == "callout":
-            text = render_text_elements(payload.get("elements")) or "callout"
-            return ["> " + text]
+            text = render_text_elements(payload.get("elements"))
+            return render_callout_lines(text, children, depth)
+        if payload_key == "table":
+            table_lines = render_table_lines(payload, children)
+            if table_lines is not None:
+                return table_lines
 
         unsupported_blocks.append(
             {
@@ -1571,6 +1670,366 @@ def upload_document_media(
         result["payload"] = payload
 
     return result
+
+
+def strip_markdown_link_title(target: str) -> str:
+    raw_target = str(target or "").strip()
+    match = re.match(r"""^(.*?)(?:\s+(?:"[^"]*"|'[^']*'))?\s*$""", raw_target)
+    return str(match.group(1) if match else raw_target).strip()
+
+
+def looks_like_windows_drive_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", str(value or "")))
+
+
+def looks_like_local_media_target(target: str) -> bool:
+    normalized = urllib_parse.unquote(str(target or "").strip())
+    if not normalized or normalized.startswith("#") or normalized.startswith("//"):
+        return False
+    if normalized.startswith(("feishu-file:", "feishu-media:")):
+        return False
+    if looks_like_windows_drive_path(normalized):
+        return True
+    parsed = urllib_parse.urlsplit(normalized)
+    if parsed.scheme and parsed.scheme.lower() in REMOTE_MEDIA_SCHEMES:
+        return False
+    if parsed.scheme and not looks_like_windows_drive_path(normalized):
+        return False
+    return True
+
+
+def resolve_local_media_reference(
+    target: str,
+    *,
+    source_info: Dict[str, Any],
+    media_root: Optional[Path],
+    expect_image: bool,
+) -> Optional[Dict[str, Any]]:
+    normalized = strip_markdown_link_title(urllib_parse.unquote(str(target or "").strip()))
+    if normalized.startswith("<") and normalized.endswith(">"):
+        normalized = normalized[1:-1].strip()
+    if not looks_like_local_media_target(normalized):
+        return None
+
+    if looks_like_windows_drive_path(normalized):
+        candidate = Path(normalized)
+    else:
+        parsed = urllib_parse.urlsplit(normalized)
+        candidate_text = str(parsed.path or normalized)
+        if not candidate_text:
+            return None
+        candidate = Path(candidate_text)
+        if not candidate.is_absolute():
+            base_dir = (
+                media_root
+                or (Path(str(source_info.get("path"))).resolve().parent if source_info.get("path") else Path.cwd())
+            )
+            candidate = base_dir / candidate
+
+    try:
+        resolved_path = candidate.resolve()
+    except OSError:
+        return None
+    if not resolved_path.is_file():
+        return None
+    if expect_image and resolved_path.suffix.lower() not in IMAGE_FILE_SUFFIXES:
+        return None
+    if not expect_image and resolved_path.suffix.lower() in {".markdown", ".md"}:
+        return None
+
+    return {
+        "path": resolved_path,
+        "relative_target": normalized,
+        "file_name": resolved_path.name,
+        "kind": "image" if expect_image else "file",
+    }
+
+
+def split_markdown_for_document_write(
+    markdown_text: str,
+    *,
+    source_info: Dict[str, Any],
+    media_root: Optional[Path],
+    enable_media_backfill: bool,
+) -> List[Dict[str, Any]]:
+    if not enable_media_backfill:
+        return [{"kind": "markdown", "content": str(markdown_text or "")}]
+
+    segments: List[Dict[str, Any]] = []
+    text_lines: List[str] = []
+    fence_delimiter: Optional[str] = None
+
+    def flush_text() -> None:
+        nonlocal text_lines
+        content = "\n".join(text_lines).strip("\n")
+        if content.strip():
+            segments.append({"kind": "markdown", "content": content})
+        text_lines = []
+
+    for line_number, line in enumerate(str(markdown_text or "").splitlines(), start=1):
+        stripped = line.strip()
+        fence_match = re.match(r"^(```+|~~~+)", stripped)
+        if fence_match:
+            delimiter = str(fence_match.group(1))
+            if fence_delimiter is None:
+                fence_delimiter = delimiter
+            elif delimiter.startswith(fence_delimiter[0]):
+                fence_delimiter = None
+            text_lines.append(line)
+            continue
+
+        if fence_delimiter is None:
+            image_match = re.match(r"^!\[([^\]]*)\]\((.+)\)\s*$", stripped)
+            if image_match:
+                resolved_media = resolve_local_media_reference(
+                    image_match.group(2),
+                    source_info=source_info,
+                    media_root=media_root,
+                    expect_image=True,
+                )
+                if resolved_media is not None:
+                    flush_text()
+                    segments.append(
+                        {
+                            "kind": "image",
+                            "line_number": line_number,
+                            "alt": image_match.group(1).strip(),
+                            **resolved_media,
+                        }
+                    )
+                    continue
+
+            link_match = re.match(r"^\[([^\]]+)\]\((.+)\)\s*$", stripped)
+            if link_match:
+                resolved_media = resolve_local_media_reference(
+                    link_match.group(2),
+                    source_info=source_info,
+                    media_root=media_root,
+                    expect_image=False,
+                )
+                if resolved_media is not None:
+                    flush_text()
+                    segments.append(
+                        {
+                            "kind": "file",
+                            "line_number": line_number,
+                            "label": link_match.group(1).strip(),
+                            **resolved_media,
+                        }
+                    )
+                    continue
+
+        text_lines.append(line)
+
+    flush_text()
+    return segments
+
+
+def remap_descendant_identifiers(value: Any, id_map: Dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {key: remap_descendant_identifiers(item, id_map) for key, item in value.items()}
+    if isinstance(value, list):
+        return [remap_descendant_identifiers(item, id_map) for item in value]
+    if isinstance(value, str) and value in id_map:
+        return id_map[value]
+    return value
+
+
+def namespace_descendant_blocks(
+    blocks: List[Dict[str, Any]],
+    first_level_ids: List[str],
+    prefix: str,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    id_map: Dict[str, str] = {}
+    for item in blocks:
+        if not isinstance(item, dict):
+            continue
+        raw_block_id = item.get("block_id")
+        if isinstance(raw_block_id, str) and raw_block_id:
+            id_map[raw_block_id] = f"{prefix}{raw_block_id}"
+
+    renamed_blocks = [
+        remap_descendant_identifiers(item, id_map)
+        for item in blocks
+        if isinstance(item, dict)
+    ]
+    renamed_first_level_ids = [
+        id_map.get(str(block_id), f"{prefix}{block_id}")
+        for block_id in first_level_ids
+        if isinstance(block_id, str) and block_id
+    ]
+    return renamed_blocks, renamed_first_level_ids
+
+
+def build_media_descendant_block(
+    *,
+    block_id: str,
+    media_kind: str,
+    file_token: str,
+    file_name: str,
+    alt_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    if media_kind == "image":
+        image_payload: Dict[str, Any] = {
+            "token": file_token,
+            "align": 1,
+        }
+        if alt_text:
+            image_payload["caption"] = {"content": alt_text}
+        return {
+            "block_id": block_id,
+            "block_type": 27,
+            "children": [],
+            "image": image_payload,
+        }
+
+    return {
+        "block_id": block_id,
+        "block_type": 23,
+        "children": [],
+        "file": {
+            "token": file_token,
+            "name": file_name,
+            "view_type": 1,
+        },
+    }
+
+
+def prepare_markdown_write_payload(
+    tenant_access_token: str,
+    document_id: str,
+    markdown_content: str,
+    source_info: Dict[str, Any],
+    base_url: str,
+    timeout: int,
+    *,
+    user_id_type: Optional[str] = None,
+    upload_media: bool = False,
+    media_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    segments = split_markdown_for_document_write(
+        markdown_content,
+        source_info=source_info,
+        media_root=media_root,
+        enable_media_backfill=upload_media,
+    )
+    if not segments:
+        return {
+            "ok": False,
+            "error": "Markdown input is empty after media preprocessing.",
+        }
+
+    descendants: List[Dict[str, Any]] = []
+    children_ids: List[str] = []
+    converted_segment_count = 0
+    media_segment_count = 0
+    image_block_count = 0
+    uploaded_items: List[Dict[str, Any]] = []
+
+    for segment_index, segment in enumerate(segments, start=1):
+        segment_kind = str(segment.get("kind") or "markdown")
+        if segment_kind == "markdown":
+            segment_content = str(segment.get("content") or "")
+            if not segment_content.strip():
+                continue
+            convert_result = convert_markdown_to_blocks(
+                tenant_access_token=tenant_access_token,
+                content=segment_content,
+                content_type="markdown",
+                base_url=base_url,
+                timeout=timeout,
+                user_id_type=user_id_type,
+            )
+            if not convert_result["ok"]:
+                return {
+                    "ok": False,
+                    "stage": "convert_markdown_segment",
+                    "segment_index": segment_index,
+                    "segment_kind": segment_kind,
+                    "segment": segment,
+                    "convert": convert_result,
+                }
+            namespaced_blocks, namespaced_first_level_ids = namespace_descendant_blocks(
+                list(convert_result.get("blocks", [])),
+                list(convert_result.get("first_level_block_ids", [])),
+                prefix=f"seg{segment_index}_",
+            )
+            descendants.extend(namespaced_blocks)
+            children_ids.extend(namespaced_first_level_ids)
+            converted_segment_count += 1
+            image_block_count += len(convert_result.get("block_id_to_image_urls", {}))
+            continue
+
+        media_path = segment.get("path")
+        if not isinstance(media_path, Path):
+            return {
+                "ok": False,
+                "stage": "resolve_local_media",
+                "segment_index": segment_index,
+                "segment_kind": segment_kind,
+                "segment": segment,
+                "error": "Could not resolve the local media path for this standalone Markdown reference.",
+            }
+        upload_result = upload_document_media(
+            tenant_access_token=tenant_access_token,
+            document_id=document_id,
+            file_path=media_path,
+            base_url=base_url,
+            timeout=timeout,
+            parent_type="docx_image" if segment_kind == "image" else "docx_file",
+            file_name=str(segment.get("file_name") or media_path.name),
+        )
+        if not upload_result["ok"]:
+            return {
+                "ok": False,
+                "stage": "upload_media",
+                "segment_index": segment_index,
+                "segment_kind": segment_kind,
+                "segment": segment,
+                "upload": upload_result,
+            }
+
+        temp_block_id = f"media_{segment_kind}_{segment_index}"
+        descendants.append(
+            build_media_descendant_block(
+                block_id=temp_block_id,
+                media_kind=segment_kind,
+                file_token=str(upload_result.get("file_token") or ""),
+                file_name=str(upload_result.get("file_name") or media_path.name),
+                alt_text=str(segment.get("alt") or segment.get("label") or media_path.stem),
+            )
+        )
+        children_ids.append(temp_block_id)
+        uploaded_items.append(
+            {
+                "line_number": segment.get("line_number"),
+                "kind": segment_kind,
+                "path": str(media_path),
+                "relative_target": segment.get("relative_target"),
+                "file_name": upload_result.get("file_name"),
+                "file_token": upload_result.get("file_token"),
+                "parent_type": upload_result.get("parent_type"),
+            }
+        )
+        media_segment_count += 1
+
+    return {
+        "ok": True,
+        "children_ids": children_ids,
+        "descendants": descendants,
+        "first_level_count": len(children_ids),
+        "block_count": len(descendants),
+        "image_block_count": image_block_count + sum(1 for item in uploaded_items if item.get("kind") == "image"),
+        "segment_count": len(segments),
+        "converted_segment_count": converted_segment_count,
+        "media_segment_count": media_segment_count,
+        "media_backfill": {
+            "enabled": upload_media,
+            "supported_markdown_shape": "standalone_local_image_or_attachment_lines",
+            "uploaded_count": len(uploaded_items),
+            "uploaded": uploaded_items,
+        },
+    }
 
 
 def strip_merge_info(value: Any) -> Any:
@@ -1805,13 +2264,119 @@ def extract_title(front_matter: Dict[str, Any], body: str, path: Path) -> str:
     return path.stem.replace("-", " ").replace("_", " ").strip() or path.name
 
 
-def discover_index_path(start: Path) -> Optional[Path]:
+def normalize_auth_mode(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in AUTH_MODE_CHOICES:
+        return normalized
+    return None
+
+
+def index_filename_for_auth_mode(auth_mode: str) -> str:
+    return USER_INDEX_FILENAME if normalize_auth_mode(auth_mode) == "user" else INDEX_FILENAME
+
+
+def index_visibility_scope_for_auth_mode(auth_mode: str) -> Optional[str]:
+    normalized = normalize_auth_mode(auth_mode)
+    if normalized == "user":
+        return "user_visible"
+    if normalized == "tenant":
+        return "tenant_visible"
+    return None
+
+
+def discover_index_file(start: Path, filename: str) -> Optional[Path]:
     current = start if start.is_dir() else start.parent
     for candidate in (current, *current.parents):
-        index_path = candidate / INDEX_FILENAME
+        index_path = candidate / filename
         if index_path.is_file():
             return index_path
     return None
+
+
+def discover_index_path(start: Path) -> Optional[Path]:
+    return discover_index_file(start, INDEX_FILENAME)
+
+
+def discover_auth_mode_index_path(start: Path, auth_mode: str = "tenant") -> Optional[Path]:
+    normalized_auth_mode = normalize_auth_mode(auth_mode) or "tenant"
+    if normalized_auth_mode == "user":
+        return discover_index_file(start, USER_INDEX_FILENAME) or discover_index_file(start, INDEX_FILENAME)
+    return discover_index_file(start, INDEX_FILENAME)
+
+
+def infer_index_payload_auth_mode(
+    index_path: Optional[Path],
+    payload: Optional[Dict[str, Any]] = None,
+    fallback_auth_mode: Optional[str] = None,
+) -> Optional[str]:
+    payload_auth_mode = normalize_auth_mode((payload or {}).get("auth_mode"))
+    if payload_auth_mode:
+        return payload_auth_mode
+    override_auth_mode = normalize_auth_mode(fallback_auth_mode)
+    if override_auth_mode:
+        return override_auth_mode
+    if index_path is None:
+        return None
+    filename = Path(index_path).name.lower()
+    if filename == USER_INDEX_FILENAME.lower():
+        return "user"
+    if filename == INDEX_FILENAME.lower():
+        return "tenant"
+    return None
+
+
+def resolve_index_context(
+    root: Path,
+    explicit_index_path: Optional[str] = None,
+    auth_mode: str = "tenant",
+) -> Dict[str, Any]:
+    if explicit_index_path:
+        resolved_index_path = Path(explicit_index_path).resolve()
+        fallback_paths: List[Path] = []
+        if (
+            normalize_auth_mode(auth_mode) == "user"
+            and resolved_index_path.name.lower() == USER_INDEX_FILENAME.lower()
+        ):
+            legacy_index_path = resolved_index_path.with_name(INDEX_FILENAME)
+            if not resolved_index_path.is_file() and legacy_index_path.is_file():
+                fallback_paths.append(legacy_index_path.resolve())
+        return {
+            "index_path": resolved_index_path,
+            "fallback_paths": fallback_paths,
+        }
+
+    resolved_root = root.resolve()
+    normalized_auth_mode = normalize_auth_mode(auth_mode) or "tenant"
+    if normalized_auth_mode == "user":
+        preferred = discover_index_file(resolved_root, USER_INDEX_FILENAME)
+        if preferred is not None:
+            return {
+                "index_path": preferred.resolve(),
+                "fallback_paths": [],
+            }
+        legacy = discover_index_file(resolved_root, INDEX_FILENAME)
+        if legacy is not None:
+            return {
+                "index_path": (legacy.parent / USER_INDEX_FILENAME).resolve(),
+                "fallback_paths": [legacy.resolve()],
+            }
+        return {
+            "index_path": (resolved_root / USER_INDEX_FILENAME).resolve(),
+            "fallback_paths": [],
+        }
+
+    discovered = discover_index_file(resolved_root, INDEX_FILENAME)
+    if discovered is not None:
+        return {
+            "index_path": discovered.resolve(),
+            "fallback_paths": [],
+        }
+    return {
+        "index_path": (resolved_root / INDEX_FILENAME).resolve(),
+        "fallback_paths": [],
+    }
 
 
 def load_index_payload(index_path: Optional[Path]) -> Dict[str, Any]:
@@ -1848,22 +2413,63 @@ def load_index_payload(index_path: Optional[Path]) -> Dict[str, Any]:
     return payload
 
 
-def load_index(index_path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+def _load_index_entries_from_path(
+    index_path: Optional[Path],
+    *,
+    auth_mode: Optional[str] = None,
+    fallback_auth_mode: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
     result: Dict[str, Dict[str, Any]] = {}
-    for entry in load_index_payload(index_path).get("files", []):
+    payload = load_index_payload(index_path)
+    payload_auth_mode = infer_index_payload_auth_mode(index_path, payload, fallback_auth_mode)
+    normalized_auth_mode = normalize_auth_mode(auth_mode)
+    for entry in payload.get("files", []):
+        if not isinstance(entry, dict):
+            continue
         relative_path = entry.get("relative_path")
-        if isinstance(relative_path, str) and relative_path:
-            result[relative_path] = entry
+        if not isinstance(relative_path, str) or not relative_path:
+            continue
+        normalized = dict(entry)
+        normalized["relative_path"] = relative_path
+        entry_auth_mode = normalize_auth_mode(normalized.get("auth_mode")) or payload_auth_mode
+        if normalized_auth_mode and entry_auth_mode and entry_auth_mode != normalized_auth_mode:
+            continue
+        if entry_auth_mode:
+            normalized["auth_mode"] = entry_auth_mode
+            normalized["visibility_scope"] = normalized.get("visibility_scope") or index_visibility_scope_for_auth_mode(entry_auth_mode)
+        normalized["_index_filename"] = Path(index_path).name if index_path is not None else INDEX_FILENAME
+        result[relative_path] = normalized
     return result
 
 
-def resolve_index_path(root: Path, explicit_index_path: Optional[str] = None) -> Path:
-    if explicit_index_path:
-        return Path(explicit_index_path).resolve()
-    discovered = discover_index_path(root)
-    if discovered:
-        return discovered.resolve()
-    return (root / INDEX_FILENAME).resolve()
+def load_index(
+    index_path: Optional[Path],
+    auth_mode: Optional[str] = None,
+    *,
+    fallback_paths: Optional[List[Path]] = None,
+    fallback_auth_mode: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    for fallback_path in fallback_paths or []:
+        result.update(
+            _load_index_entries_from_path(
+                fallback_path,
+                auth_mode=auth_mode,
+                fallback_auth_mode=fallback_auth_mode,
+            )
+        )
+    result.update(
+        _load_index_entries_from_path(
+            index_path,
+            auth_mode=auth_mode,
+            fallback_auth_mode=fallback_auth_mode,
+        )
+    )
+    return result
+
+
+def resolve_index_path(root: Path, explicit_index_path: Optional[str] = None, auth_mode: str = "tenant") -> Path:
+    return Path(resolve_index_context(root, explicit_index_path, auth_mode)["index_path"]).resolve()
 
 
 def write_index_payload(index_path: Path, payload: Dict[str, Any]) -> None:
@@ -1881,19 +2487,54 @@ def write_index_payload(index_path: Path, payload: Dict[str, Any]) -> None:
     index_path.write_text(json.dumps(normalized_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def update_index_entry(index_path: Path, relative_path: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+def update_index_entry(
+    index_path: Path,
+    relative_path: str,
+    updates: Dict[str, Any],
+    *,
+    auth_mode: Optional[str] = None,
+) -> Dict[str, Any]:
     payload = load_index_payload(index_path)
+    normalized_auth_mode = normalize_auth_mode(auth_mode)
+    existing_payload_auth_mode = normalize_auth_mode(payload.get("auth_mode"))
+    if existing_payload_auth_mode is None and payload.get("files"):
+        existing_payload_auth_mode = infer_index_payload_auth_mode(index_path, payload)
+        if (
+            normalized_auth_mode == "user"
+            and existing_payload_auth_mode == "tenant"
+            and payload.get("auth_mode") in (None, "")
+            and not any(
+                normalize_auth_mode(entry.get("auth_mode"))
+                for entry in payload.get("files", [])
+                if isinstance(entry, dict)
+            )
+        ):
+            existing_payload_auth_mode = None
+    if normalized_auth_mode and existing_payload_auth_mode and existing_payload_auth_mode != normalized_auth_mode:
+        raise ValueError(
+            f"Index scope mismatch: {index_path} is tagged for {existing_payload_auth_mode}-mode mappings and cannot be updated by {normalized_auth_mode}-mode sync."
+        )
     entries = {
         str(entry.get("relative_path")): dict(entry)
         for entry in payload.get("files", [])
         if isinstance(entry, dict) and entry.get("relative_path")
     }
     entry = dict(entries.get(relative_path, {}))
+    entry_auth_mode = normalize_auth_mode(entry.get("auth_mode")) or existing_payload_auth_mode
+    if normalized_auth_mode and entry_auth_mode and entry_auth_mode != normalized_auth_mode:
+        raise ValueError(
+            f"Index entry scope mismatch for {relative_path}: {index_path} already contains a {entry_auth_mode}-mode mapping."
+        )
     entry["relative_path"] = relative_path
     for key, value in updates.items():
         if value is None:
             continue
         entry[key] = value
+    if normalized_auth_mode:
+        payload["auth_mode"] = normalized_auth_mode
+        payload["visibility_scope"] = index_visibility_scope_for_auth_mode(normalized_auth_mode)
+        entry["auth_mode"] = normalized_auth_mode
+        entry["visibility_scope"] = index_visibility_scope_for_auth_mode(normalized_auth_mode)
     entries[relative_path] = entry
     payload["files"] = list(entries.values())
     write_index_payload(index_path, payload)
@@ -2224,6 +2865,8 @@ def is_markdown_structural_line(line: str) -> bool:
         return True
     if re.match(r"^\[[^\]]+\]\([^)]+\)\s*$", stripped):
         return True
+    if stripped.startswith("|"):
+        return True
     if re.match(r"^(-{3,}|\*{3,}|_{3,})\s*$", stripped):
         return True
     return False
@@ -2277,6 +2920,24 @@ def parse_markdown_semantic_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             index += 1
             continue
 
+        callout_match = re.match(r"^>\s*\[!([A-Za-z0-9_-]+)\]\s*(.*?)\s*$", stripped)
+        if callout_match:
+            flush_paragraph()
+            variant = callout_match.group(1).strip().lower() or "callout"
+            callout_lines: List[str] = []
+            first_line_text = callout_match.group(2).strip()
+            if first_line_text:
+                callout_lines.append(first_line_text)
+            index += 1
+            while index < len(lines):
+                current = lines[index].strip()
+                if not current.startswith(">"):
+                    break
+                callout_lines.append(re.sub(r"^>\s?", "", current))
+                index += 1
+            blocks.append(build_semantic_block("callout", "\n".join(callout_lines).strip(), variant=variant))
+            continue
+
         if stripped.startswith(">"):
             flush_paragraph()
             quote_lines: List[str] = []
@@ -2288,6 +2949,23 @@ def parse_markdown_semantic_blocks(markdown_text: str) -> List[Dict[str, Any]]:
                 index += 1
             blocks.append(build_semantic_block("quote", "\n".join(quote_lines).strip()))
             continue
+
+        if stripped.startswith("|") and index + 1 < len(lines):
+            separator = lines[index + 1].strip()
+            if re.match(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$", separator):
+                flush_paragraph()
+                table_lines = [line.rstrip() for line in lines[index:index + 2]]
+                index += 2
+                while index < len(lines):
+                    candidate = lines[index]
+                    if not candidate.strip():
+                        break
+                    if not candidate.strip().startswith("|"):
+                        break
+                    table_lines.append(candidate.rstrip())
+                    index += 1
+                blocks.append(build_semantic_block("table", "\n".join(table_lines).strip()))
+                continue
 
         task_match = re.match(r"^[-*+]\s+\[([ xX])\]\s+(.+?)\s*$", stripped)
         if task_match:
@@ -2359,7 +3037,10 @@ def parse_markdown_semantic_blocks(markdown_text: str) -> List[Dict[str, Any]]:
             flush_paragraph()
             name = link_match.group(1).strip()
             target = link_match.group(2).strip()
-            blocks.append(build_semantic_block("link", name or target, variant=target))
+            if target.startswith("feishu-file:"):
+                blocks.append(build_semantic_block("file", name or target, variant=target))
+            else:
+                blocks.append(build_semantic_block("link", name or target, variant=target))
             index += 1
             continue
 
@@ -2391,6 +3072,12 @@ def summarize_semantic_block(block: Dict[str, Any]) -> Dict[str, Any]:
         label = f"code:{language}" if language else "code"
     elif block_type == "image" and variant:
         label = f"image:{variant}"
+    elif block_type == "file" and variant:
+        label = f"file:{variant}"
+    elif block_type == "callout":
+        label = f"callout:{variant or 'callout'}"
+    elif block_type == "table":
+        label = "table"
     elif block_type == "link" and variant:
         label = f"link:{variant}"
     preview = normalized_text[:120]
@@ -2520,6 +3207,14 @@ def render_semantic_blocks_to_markdown(blocks: List[Dict[str, Any]]) -> str:
             quote_text = text.strip()
             rendered.append("\n".join("> " + line if line else ">" for line in quote_text.splitlines()))
             continue
+        if block_type == "callout":
+            variant = str(block.get("variant") or "callout").strip().upper() or "CALLOUT"
+            callout_lines = text.splitlines() if text else []
+            section_lines = [f"> [!{variant}]"]
+            for line in callout_lines:
+                section_lines.append("> " + line if line else ">")
+            rendered.append("\n".join(section_lines))
+            continue
         if block_type == "list_item":
             variant = str(block.get("variant") or "bullet")
             prefix = "- "
@@ -2542,9 +3237,16 @@ def render_semantic_blocks_to_markdown(blocks: List[Dict[str, Any]]) -> str:
             target = str(block.get("variant") or "").strip()
             rendered.append(f"![{text}]({target})" if target else f"![{text}]()")
             continue
+        if block_type == "file":
+            target = str(block.get("variant") or "").strip()
+            rendered.append(f"[{text}]({target})" if target else f"[{text}]()")
+            continue
         if block_type == "link":
             target = str(block.get("variant") or "").strip()
             rendered.append(f"[{text}]({target})" if target else f"[{text}]()")
+            continue
+        if block_type == "table":
+            rendered.append(text.strip())
             continue
         if block_type == "divider":
             rendered.append("---")
@@ -3710,7 +4412,7 @@ def derive_relative_pull_path(
     if existing:
         relative_path = str(existing["relative_path"])
         used_paths.add(relative_path)
-        return relative_path, "feishu-index.json"
+        return relative_path, str(existing.get("_index_filename") or INDEX_FILENAME)
 
     folder_parts = [
         sanitize_path_component(part, fallback="folder")
@@ -4014,6 +4716,7 @@ def execute_pull_markdown(
     relative_path_hint: Optional[str] = None,
     write_index: bool = False,
     fidelity: str = "low",
+    auth_mode: str = "tenant",
 ) -> Dict[str, Any]:
     metadata_result = probe_document_connectivity(
         tenant_access_token=tenant_access_token,
@@ -4154,7 +4857,7 @@ def execute_pull_markdown(
     index_entry = None
     resolved_index_path = None
     if write_index and effective_root is not None:
-        resolved_index_path = resolve_index_path(effective_root, index_path)
+        resolved_index_path = resolve_index_path(effective_root, index_path, auth_mode=auth_mode)
         body_hash = sha256_text(body_markdown_output)
         index_entry = update_index_entry(
             resolved_index_path,
@@ -4173,6 +4876,7 @@ def execute_pull_markdown(
                 "last_pull_fidelity": fidelity_result.get("source"),
                 "last_sync_operation": "pull",
             },
+            auth_mode=auth_mode,
         )
 
     return {
@@ -4223,12 +4927,24 @@ def build_sync_dir_dry_run(
     if not resolved_root.is_dir():
         raise FileNotFoundError(f"Sync root not found: {resolved_root}")
 
-    effective_index_path = resolve_index_path(resolved_root, index_path)
-    index_entries = load_index(effective_index_path)
+    index_context = resolve_index_context(resolved_root, index_path, auth_mode)
+    effective_index_path = Path(index_context["index_path"]).resolve()
+    index_entries = load_index(
+        effective_index_path,
+        auth_mode=auth_mode,
+        fallback_paths=index_context.get("fallback_paths", []),
+        fallback_auth_mode=auth_mode if auth_mode == "user" else None,
+    )
     doc_token_index = build_doc_token_index(index_entries)
     local_paths = iter_markdown_files(resolved_root)
     local_plans = [
-        plan_file(path, mode="push", root=resolved_root, index_path=effective_index_path)
+        plan_file(
+            path,
+            mode="push",
+            root=resolved_root,
+            index_path=effective_index_path,
+            auth_mode=auth_mode,
+        )
         for path in local_paths
     ]
 
@@ -4394,7 +5110,7 @@ def build_sync_dir_dry_run(
         "conflict_detection": conflict_detection,
         "risks": risks,
         "notes": [
-            "sync-dir dry-run builds the plan without modifying remote docs or feishu-index.json.",
+            "sync-dir dry-run builds the plan without modifying remote docs or the current auth-mode Feishu index file.",
             "Prune execution is available only with --prune --confirm-prune and still does not perform mixed push or pull execution.",
             f"Remote pull candidates are derived from visible {visibility_scope} docx files that are not yet mapped locally.",
             "Prune candidates are limited to index-mapped remote docs whose local Markdown files are now missing.",
@@ -5043,6 +5759,7 @@ def execute_sync_dir_bidirectional(
                 relative_path_hint=relative_path,
                 write_index=True,
                 fidelity=pull_fidelity,
+                auth_mode=auth_mode,
             )
             execution_results.append(
                 {
@@ -5082,6 +5799,7 @@ def execute_sync_dir_bidirectional(
                 relative_path_hint=target_relative_path,
                 write_index=True,
                 fidelity=pull_fidelity,
+                auth_mode=auth_mode,
             )
             execution_results.append(
                 {
@@ -5452,7 +6170,7 @@ def resolve_mapping(
             value = index_entry.get(index_alias)
             if value not in (None, ""):
                 mapping[target_field] = value
-                source[target_field] = INDEX_FILENAME
+                source[target_field] = str(index_entry.get("_index_filename") or INDEX_FILENAME)
 
     return mapping, source
 
@@ -5471,17 +6189,25 @@ def plan_file(
     mode: str,
     root: Optional[Path] = None,
     index_path: Optional[Path] = None,
+    auth_mode: str = "tenant",
 ) -> Dict[str, Any]:
     resolved_path = path.resolve()
     if not resolved_path.is_file():
         raise FileNotFoundError(f"Markdown file not found: {resolved_path}")
 
     if index_path is None:
-        index_path = discover_index_path(resolved_path)
+        index_path = discover_auth_mode_index_path(resolved_path, auth_mode)
     resolved_root = (root or (index_path.parent if index_path else resolved_path.parent)).resolve()
     if not resolved_root.is_dir():
         raise FileNotFoundError(f"Sync root not found: {resolved_root}")
-    index_entries = load_index(index_path)
+    index_context = resolve_index_context(resolved_root, str(index_path) if index_path else None, auth_mode)
+    effective_index_path = Path(index_context["index_path"]).resolve()
+    index_entries = load_index(
+        effective_index_path,
+        auth_mode=auth_mode,
+        fallback_paths=index_context.get("fallback_paths", []),
+        fallback_auth_mode=auth_mode if auth_mode == "user" else None,
+    )
 
     front_matter, body, has_front_matter, title = read_markdown_file(resolved_path)
     relative_path = resolved_path.relative_to(resolved_root).as_posix()
@@ -5495,7 +6221,11 @@ def plan_file(
     body_hash = sha256_text(body)
 
     warnings: List[str] = [
-        "Use push-markdown or push-dir for tenant-mode execution after reviewing this plan."
+        (
+            "Use push-markdown or push-dir with --auth-mode user after reviewing this plan."
+            if auth_mode == "user"
+            else "Use push-markdown or push-dir for tenant-mode execution after reviewing this plan."
+        )
     ]
 
     if mode == "push" and sync_direction == "pull":
@@ -5533,7 +6263,7 @@ def plan_file(
         "folder_token": folder_token,
         "wiki_node_token": wiki_node_token,
         "sync_direction": sync_direction,
-        "index_path": str(index_path.resolve()) if index_path else None,
+        "index_path": str(effective_index_path),
         "mapping_source": mapping_source,
         "warnings": warnings,
     }
@@ -5561,33 +6291,39 @@ def append_markdown_to_document(
     index: Optional[int] = None,
     client_token: Optional[str] = None,
     show_converted_blocks: bool = False,
+    upload_media: bool = False,
+    media_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    convert_result = convert_markdown_to_blocks(
+    prepared_payload = prepare_markdown_write_payload(
         tenant_access_token=tenant_access_token,
-        content=markdown_content,
-        content_type="markdown",
+        document_id=document_id,
+        markdown_content=markdown_content,
+        source_info=source_info,
         base_url=base_url,
         timeout=timeout,
         user_id_type=user_id_type,
+        upload_media=upload_media,
+        media_root=media_root,
     )
-    if not convert_result["ok"]:
+    if not prepared_payload["ok"]:
         return {
             "ok": False,
             "base_url": base_url,
             "official_docs": [
                 OFFICIAL_REFERENCES["convert_markdown_html"],
                 OFFICIAL_REFERENCES["create_descendant_blocks"],
+                OFFICIAL_REFERENCES["upload_media"],
             ],
             "source": source_info,
-            "convert": convert_result,
+            "prepare": prepared_payload,
         }
 
     create_result = create_descendant_blocks(
         tenant_access_token=tenant_access_token,
         document_id=document_id,
         block_id=parent_block_id or document_id,
-        children_ids=list(convert_result["first_level_block_ids"]),
-        descendants=list(convert_result["blocks"]),
+        children_ids=list(prepared_payload["children_ids"]),
+        descendants=list(prepared_payload["descendants"]),
         base_url=base_url,
         timeout=timeout,
         document_revision_id=document_revision_id,
@@ -5602,6 +6338,7 @@ def append_markdown_to_document(
         "official_docs": [
             OFFICIAL_REFERENCES["convert_markdown_html"],
             OFFICIAL_REFERENCES["create_descendant_blocks"],
+            OFFICIAL_REFERENCES["upload_media"],
         ],
         "source": source_info,
         "request": {
@@ -5614,11 +6351,15 @@ def append_markdown_to_document(
             "content_hash": sha256_text(markdown_content),
         },
         "convert": {
-            "ok": convert_result["ok"],
-            "first_level_count": convert_result["first_level_count"],
-            "block_count": convert_result["block_count"],
-            "image_block_count": len(convert_result.get("block_id_to_image_urls", {})),
+            "ok": prepared_payload["ok"],
+            "first_level_count": prepared_payload["first_level_count"],
+            "block_count": prepared_payload["block_count"],
+            "image_block_count": prepared_payload["image_block_count"],
+            "segment_count": prepared_payload["segment_count"],
+            "converted_segment_count": prepared_payload["converted_segment_count"],
+            "media_segment_count": prepared_payload["media_segment_count"],
         },
+        "media_backfill": prepared_payload.get("media_backfill"),
         "write_result": create_result,
         "notes": [
             "This write path appends converted Markdown blocks under the selected parent block.",
@@ -5626,9 +6367,13 @@ def append_markdown_to_document(
             "Table merge_info fields are stripped automatically before descendant block creation.",
         ],
     }
+    if upload_media:
+        response["notes"].append(
+            "With --upload-media, standalone local Markdown image or attachment lines are uploaded first and then inserted as Feishu image/file blocks."
+        )
     if show_converted_blocks:
-        response["convert"]["first_level_block_ids"] = convert_result["first_level_block_ids"]
-        response["convert"]["blocks"] = convert_result["blocks"]
+        response["convert"]["first_level_block_ids"] = prepared_payload["children_ids"]
+        response["convert"]["blocks"] = prepared_payload["descendants"]
     return response
 
 
@@ -5642,6 +6387,8 @@ def replace_markdown_in_document(
     document_revision_id: int = -1,
     user_id_type: Optional[str] = None,
     show_converted_blocks: bool = False,
+    upload_media: bool = False,
+    media_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     inspect_result = list_document_blocks(
         tenant_access_token=tenant_access_token,
@@ -5743,6 +6490,8 @@ def replace_markdown_in_document(
         parent_block_id=document_id,
         user_id_type=user_id_type,
         show_converted_blocks=show_converted_blocks,
+        upload_media=upload_media,
+        media_root=media_root,
     )
 
     return {
@@ -5784,6 +6533,8 @@ def execute_push_markdown(
     folder_resolution: Optional[Dict[str, Any]] = None,
     auth_mode: str = "tenant",
     allow_create: bool = True,
+    upload_media: bool = False,
+    media_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     resolved_path = markdown_path.resolve()
     if not resolved_path.is_file():
@@ -5792,7 +6543,7 @@ def execute_push_markdown(
     if root is not None:
         resolved_root = root.resolve()
     else:
-        discovered_index_path = Path(index_path).resolve() if index_path else discover_index_path(resolved_path)
+        discovered_index_path = Path(index_path).resolve() if index_path else discover_auth_mode_index_path(resolved_path, auth_mode)
         resolved_root = (discovered_index_path.parent if discovered_index_path else resolved_path.parent).resolve()
     if not resolved_root.is_dir():
         raise FileNotFoundError(f"Sync root not found: {resolved_root}")
@@ -5800,8 +6551,14 @@ def execute_push_markdown(
     if resolved_path.parent != resolved_root and resolved_root not in resolved_path.parents:
         raise ValueError(f"Markdown file {resolved_path} is not under sync root {resolved_root}")
 
-    effective_index_path = resolve_index_path(resolved_root, index_path)
-    index_entries = load_index(effective_index_path)
+    index_context = resolve_index_context(resolved_root, index_path, auth_mode)
+    effective_index_path = Path(index_context["index_path"]).resolve()
+    index_entries = load_index(
+        effective_index_path,
+        auth_mode=auth_mode,
+        fallback_paths=index_context.get("fallback_paths", []),
+        fallback_auth_mode=auth_mode if auth_mode == "user" else None,
+    )
     relative_path = resolved_path.relative_to(resolved_root).as_posix()
 
     front_matter, body, has_front_matter, title = read_markdown_file(resolved_path)
@@ -5875,6 +6632,8 @@ def execute_push_markdown(
             source_info=source_info,
             base_url=base_url,
             timeout=timeout,
+            upload_media=upload_media,
+            media_root=media_root,
         )
         action = "replace_doc"
         final_doc_token = str(doc_token)
@@ -5920,6 +6679,8 @@ def execute_push_markdown(
             base_url=base_url,
             timeout=timeout,
             document_revision_id=-1,
+            upload_media=upload_media,
+            media_root=media_root,
         )
         write_result = {
             "ok": append_result["ok"],
@@ -5958,6 +6719,7 @@ def execute_push_markdown(
             "remote_content_hash": "",
             "last_sync_operation": "push",
         },
+        auth_mode=auth_mode,
     )
 
     return {
@@ -5979,8 +6741,13 @@ def execute_push_markdown(
         "folder_resolution": folder_resolution,
         "write": write_result,
         "notes": [
-            "push-markdown writes Markdown changes to Feishu under the current token identity and then updates feishu-index.json.",
+            f"push-markdown writes Markdown changes to Feishu under the current token identity and then updates {index_filename_for_auth_mode(auth_mode)}.",
             "Existing documents use replace-markdown; new documents use create-document plus append-markdown.",
+            (
+                "With --upload-media, standalone local Markdown image or attachment lines are uploaded into the destination document workflow before the final block write."
+                if upload_media
+                else "Local Markdown media references are passed through unchanged unless --upload-media is enabled."
+            ),
         ],
     }
 
@@ -7438,6 +8205,7 @@ def command_pull_markdown(args: argparse.Namespace) -> int:
             relative_path_hint=args.relative_path,
             write_index=bool(args.write_index or args.root or args.index_path),
             fidelity=args.fidelity,
+            auth_mode=auth_mode,
         )
     except (ValueError, FileNotFoundError, OSError) as exc:
         print_json(
@@ -7483,6 +8251,8 @@ def command_append_markdown(args: argparse.Namespace) -> int:
         OFFICIAL_REFERENCES["convert_markdown_html"],
         OFFICIAL_REFERENCES["create_descendant_blocks"],
     ]
+    if args.upload_media:
+        official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["upload_media"]])
     token_label = access_token_label_for_mode(auth_mode)
     try:
         token_result = resolve_read_access_token(args)
@@ -7548,6 +8318,8 @@ def command_append_markdown(args: argparse.Namespace) -> int:
                     "client_token": args.client_token,
                     "keep_front_matter": bool(args.keep_front_matter),
                     "show_converted_blocks": bool(args.show_converted_blocks),
+                    "upload_media": bool(args.upload_media),
+                    "media_root": args.media_root,
                 },
                 auth=auth,
                 error=f"Failed to resolve {token_label} for append-markdown.",
@@ -7609,6 +8381,8 @@ def command_append_markdown(args: argparse.Namespace) -> int:
         index=args.index,
         client_token=args.client_token,
         show_converted_blocks=args.show_converted_blocks,
+        upload_media=args.upload_media,
+        media_root=Path(args.media_root).resolve() if args.media_root else None,
     )
     response["token_source"] = token_result.get("source")
     result_payload = dict(response)
@@ -7632,6 +8406,8 @@ def command_append_markdown(args: argparse.Namespace) -> int:
                 "confirm_user_write": bool(args.confirm_user_write),
                 "keep_front_matter": bool(args.keep_front_matter),
                 "show_converted_blocks": bool(args.show_converted_blocks),
+                "upload_media": bool(args.upload_media),
+                "media_root": args.media_root,
                 "markdown_source": source_info,
             },
             auth=auth,
@@ -7653,6 +8429,8 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
         OFFICIAL_REFERENCES["convert_markdown_html"],
         OFFICIAL_REFERENCES["create_descendant_blocks"],
     ]
+    if args.upload_media:
+        official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["upload_media"]])
     token_label = access_token_label_for_mode(auth_mode)
     try:
         token_result = resolve_read_access_token(args)
@@ -7717,6 +8495,8 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
                     "confirm_user_write": bool(args.confirm_user_write),
                     "keep_front_matter": bool(args.keep_front_matter),
                     "show_converted_blocks": bool(args.show_converted_blocks),
+                    "upload_media": bool(args.upload_media),
+                    "media_root": args.media_root,
                 },
                 auth=auth,
                 error=f"Failed to resolve {token_label} for replace-markdown.",
@@ -7794,6 +8574,8 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
         document_revision_id=args.document_revision_id,
         user_id_type=args.user_id_type,
         show_converted_blocks=args.show_converted_blocks,
+        upload_media=args.upload_media,
+        media_root=Path(args.media_root).resolve() if args.media_root else None,
     )
     response["token_source"] = token_result.get("source")
     result_payload = dict(response)
@@ -7815,6 +8597,8 @@ def command_replace_markdown(args: argparse.Namespace) -> int:
                 "confirm_user_write": bool(args.confirm_user_write),
                 "keep_front_matter": bool(args.keep_front_matter),
                 "show_converted_blocks": bool(args.show_converted_blocks),
+                "upload_media": bool(args.upload_media),
+                "media_root": args.media_root,
                 "markdown_source": source_info,
             },
             auth=auth,
@@ -7835,6 +8619,8 @@ def command_push_markdown(args: argparse.Namespace) -> int:
         OFFICIAL_REFERENCES["convert_markdown_html"],
         OFFICIAL_REFERENCES["create_descendant_blocks"],
     ]
+    if args.upload_media:
+        official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["upload_media"]])
     token_label = access_token_label_for_mode(auth_mode)
     request_payload = {
         "auth_mode": auth_mode,
@@ -7847,6 +8633,8 @@ def command_push_markdown(args: argparse.Namespace) -> int:
         "confirm_user_write": bool(args.confirm_user_write),
         "allow_user_create": bool(args.allow_user_create),
         "ignore_sync_direction": bool(args.ignore_sync_direction),
+        "upload_media": bool(args.upload_media),
+        "media_root": args.media_root,
     }
     try:
         token_result = resolve_read_access_token(args)
@@ -7922,6 +8710,8 @@ def command_push_markdown(args: argparse.Namespace) -> int:
             ignore_sync_direction=args.ignore_sync_direction,
             auth_mode=auth_mode,
             allow_create=bool(args.allow_user_create) if auth_mode == "user" else True,
+            upload_media=args.upload_media,
+            media_root=Path(args.media_root).resolve() if args.media_root else None,
         )
     except (ValueError, FileNotFoundError) as exc:
         print_json(
@@ -7968,6 +8758,8 @@ def command_push_dir(args: argparse.Namespace) -> int:
         OFFICIAL_REFERENCES["convert_markdown_html"],
         OFFICIAL_REFERENCES["create_descendant_blocks"],
     ]
+    if args.upload_media:
+        official_docs = normalize_reference_list(official_docs, [OFFICIAL_REFERENCES["upload_media"]])
     if args.mirror_remote_folders:
         official_docs = normalize_reference_list(
             official_docs,
@@ -7990,6 +8782,8 @@ def command_push_dir(args: argparse.Namespace) -> int:
         "mirror_remote_folders": bool(args.mirror_remote_folders),
         "confirm_user_write": bool(args.confirm_user_write),
         "allow_user_create": bool(args.allow_user_create),
+        "upload_media": bool(args.upload_media),
+        "media_root": args.media_root,
     }
     try:
         token_result = resolve_read_access_token(args)
@@ -8067,13 +8861,19 @@ def command_push_dir(args: argparse.Namespace) -> int:
         )
         return 1
 
-    effective_index_path = resolve_index_path(root, args.index_path)
+    index_context = resolve_index_context(root, args.index_path, auth_mode)
+    effective_index_path = Path(index_context["index_path"]).resolve()
     allow_create = bool(args.allow_user_create) if auth_mode == "user" else True
     folder_cache: Optional[Dict[str, str]] = None
     child_listing_cache: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None
     root_folder_token: Optional[str] = None
     if args.mirror_remote_folders:
-        index_entries = load_index(effective_index_path)
+        index_entries = load_index(
+            effective_index_path,
+            auth_mode=auth_mode,
+            fallback_paths=index_context.get("fallback_paths", []),
+            fallback_auth_mode=auth_mode if auth_mode == "user" else None,
+        )
         directory_folder_tokens, directory_conflicts = build_directory_folder_token_index(index_entries)
         if directory_conflicts:
             print_json(
@@ -8087,7 +8887,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
                     request=dict(request_payload, path=str(root)),
                     auth=auth,
                     result={"directory_folder_conflicts": directory_conflicts},
-                    error="Conflicting folder_token mappings were found for one or more local directories. Resolve feishu-index.json before using --mirror-remote-folders.",
+                    error="Conflicting folder_token mappings were found for one or more local directories. Resolve the current auth-mode Feishu index file before using --mirror-remote-folders.",
                 )
             )
             return 1
@@ -8134,7 +8934,7 @@ def command_push_dir(args: argparse.Namespace) -> int:
         folder_resolution = None
         try:
             if args.mirror_remote_folders and allow_create and root_folder_token and folder_cache is not None and child_listing_cache is not None:
-                plan = plan_file(path, mode="push", root=root, index_path=effective_index_path)
+                plan = plan_file(path, mode="push", root=root, index_path=effective_index_path, auth_mode=auth_mode)
                 if plan.get("action") == "create_doc_in_root":
                     relative_dir = normalize_relative_dir(Path(str(plan["relative_path"])).parent.as_posix())
                     folder_resolution = ensure_remote_folder_hierarchy(
@@ -8181,6 +8981,8 @@ def command_push_dir(args: argparse.Namespace) -> int:
                 folder_resolution=folder_resolution,
                 auth_mode=auth_mode,
                 allow_create=allow_create,
+                upload_media=args.upload_media,
+                media_root=Path(args.media_root).resolve() if args.media_root else None,
             )
         except (ValueError, FileNotFoundError) as exc:
             result = {
@@ -8214,6 +9016,10 @@ def command_push_dir(args: argparse.Namespace) -> int:
             f"push-dir executes {auth_mode}-mode push-markdown for every Markdown file under the target root.",
             "Existing documents require --confirm-replace because updates clear the remote doc body before writing.",
     ]
+    if args.upload_media:
+        notes.append(
+            "With --upload-media, standalone local Markdown image or attachment lines are uploaded into each destination document workflow before the final block write."
+        )
     if auth_mode == "user":
         notes.append(
             "User-mode push-dir updates mapped docs by default; add --allow-user-create only when unmapped local files should create new user-visible docs."
@@ -8311,7 +9117,14 @@ def command_pull_dir(args: argparse.Namespace) -> int:
     root = Path(args.path).resolve()
     root.mkdir(parents=True, exist_ok=True)
     existing_markdown_paths = {path.relative_to(root).as_posix() for path in iter_markdown_files(root)}
-    index_entries = load_index(resolve_index_path(root, args.index_path))
+    index_context = resolve_index_context(root, args.index_path, auth_mode)
+    effective_index_path = Path(index_context["index_path"]).resolve()
+    index_entries = load_index(
+        effective_index_path,
+        auth_mode=auth_mode,
+        fallback_paths=index_context.get("fallback_paths", []),
+        fallback_auth_mode=auth_mode if auth_mode == "user" else None,
+    )
     doc_token_index = build_doc_token_index(index_entries)
     used_paths = set(existing_markdown_paths)
 
@@ -8366,6 +9179,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
             relative_path_hint=relative_path,
             write_index=True,
             fidelity=args.fidelity,
+            auth_mode=auth_mode,
         )
         result["path_source"] = path_source
         results.append(result)
@@ -8389,7 +9203,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
             auth=auth,
             result={
                 "root": str(root),
-                "index_path": str(resolve_index_path(root, args.index_path)),
+                "index_path": str(effective_index_path),
                 "remote_listing": {
                     "page_count": listing["page_count"],
                     "folder_count": listing["folder_count"],
@@ -8413,7 +9227,7 @@ def command_pull_dir(args: argparse.Namespace) -> int:
                 ]
             )
             + [
-                "The command writes feishu-index.json entries so later push and pull planning can reuse the same mappings.",
+                f"The command writes {index_filename_for_auth_mode(auth_mode)} entries so later push and pull planning can reuse the same mappings.",
             ],
         )
     )
@@ -9102,13 +9916,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pull_markdown_parser.add_argument("document_id", help="Docx document id or token.")
     pull_markdown_parser.add_argument("--output", help="Optional output Markdown file path. If omitted, a title-derived file is created under --root or the current directory.")
-    pull_markdown_parser.add_argument("--root", help="Optional sync root used for relative output paths and feishu-index.json.")
+    pull_markdown_parser.add_argument("--root", help="Optional sync root used for relative output paths and the current auth-mode Feishu index file.")
     pull_markdown_parser.add_argument("--relative-path", help="Optional relative Markdown path used when deriving the output under --root.")
-    pull_markdown_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
-    pull_markdown_parser.add_argument("--folder-token", help="Optional folder token stored back into feishu-index.json when index write-back is enabled.")
+    pull_markdown_parser.add_argument("--index-path", help="Optional auth-mode-aware Feishu index override path.")
+    pull_markdown_parser.add_argument("--folder-token", help="Optional folder token stored back into the current auth-mode Feishu index file when index write-back is enabled.")
     pull_markdown_parser.add_argument("--title", help="Optional title override used for the local Markdown file and front matter.")
     pull_markdown_parser.add_argument("--overwrite", action="store_true", help="Overwrite the local Markdown file if it already exists.")
-    pull_markdown_parser.add_argument("--write-index", action="store_true", help="Write or update feishu-index.json even when --root is not explicitly set.")
+    pull_markdown_parser.add_argument("--write-index", action="store_true", help="Write or update the current auth-mode Feishu index file even when --root is not explicitly set.")
     pull_markdown_parser.add_argument("--fidelity", choices=("low", "high"), default="low", help="Export mode. low uses raw_content; high rebuilds Markdown from document blocks for common block types.")
     pull_markdown_parser.add_argument("--sync-direction", choices=tuple(sorted(VALID_SYNC_DIRECTIONS)), default="pull", help="sync_direction value written into front matter and index metadata. Defaults to pull.")
     pull_markdown_parser.add_argument("--app-id", help="Feishu app id. Defaults to FEISHU_APP_ID.")
@@ -9155,6 +9969,8 @@ def build_parser() -> argparse.ArgumentParser:
     append_markdown_parser.add_argument("--user-id-type", help="Optional user_id_type query value for block conversion and write requests.")
     append_markdown_parser.add_argument("--client-token", help="Optional UUIDv4 idempotency token for descendant block creation.")
     append_markdown_parser.add_argument("--show-converted-blocks", action="store_true", help="Include converted block payloads in the JSON output.")
+    append_markdown_parser.add_argument("--upload-media", action="store_true", help="Upload standalone local Markdown image or attachment lines first and insert them as Feishu image/file blocks.")
+    append_markdown_parser.add_argument("--media-root", help="Optional base directory used to resolve relative local media paths when --upload-media is enabled.")
     append_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for the remote write. Use user to append with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
     append_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
     append_markdown_parser.add_argument("--confirm-user-write", action="store_true", help="Required protection flag before append-markdown performs a user-mode remote write.")
@@ -9176,6 +9992,8 @@ def build_parser() -> argparse.ArgumentParser:
     replace_markdown_parser.add_argument("--document-revision-id", type=int, default=-1, help="Document revision to edit. Defaults to -1 for latest.")
     replace_markdown_parser.add_argument("--user-id-type", help="Optional user_id_type query value for block conversion and write requests.")
     replace_markdown_parser.add_argument("--show-converted-blocks", action="store_true", help="Include converted block payloads in the JSON output.")
+    replace_markdown_parser.add_argument("--upload-media", action="store_true", help="Upload standalone local Markdown image or attachment lines first and insert them as Feishu image/file blocks.")
+    replace_markdown_parser.add_argument("--media-root", help="Optional base directory used to resolve relative local media paths when --upload-media is enabled.")
     replace_markdown_parser.add_argument("--confirm-replace", action="store_true", help="Required safety flag for destructive remote replacement.")
     replace_markdown_parser.add_argument("--auth-mode", choices=AUTH_MODE_CHOICES, default="tenant", help="Identity model for the remote write. Use user to replace with FEISHU_USER_ACCESS_TOKEN or --user-access-token.")
     replace_markdown_parser.add_argument("--user-access-token", help="Feishu user_access_token used when --auth-mode user. Defaults to FEISHU_USER_ACCESS_TOKEN.")
@@ -9184,15 +10002,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     push_markdown_parser = subparsers.add_parser(
         "push-markdown",
-        help="Push one local Markdown file to Feishu and write back feishu-index.json.",
+        help="Push one local Markdown file to Feishu and write back the current auth-mode Feishu index file.",
     )
     push_markdown_parser.add_argument("path", help="Path to the Markdown file.")
-    push_markdown_parser.add_argument("--root", help="Optional sync root used for relative paths and feishu-index.json.")
-    push_markdown_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
+    push_markdown_parser.add_argument("--root", help="Optional sync root used for relative paths and the current auth-mode Feishu index file.")
+    push_markdown_parser.add_argument("--index-path", help="Optional auth-mode-aware Feishu index override path.")
     push_markdown_parser.add_argument("--folder-token", help="Optional folder token override used when creating new docs.")
     push_markdown_parser.add_argument("--keep-front-matter", action="store_true", help="Do not strip YAML front matter when reading the Markdown file.")
     push_markdown_parser.add_argument("--ignore-sync-direction", action="store_true", help="Push even if the file is currently marked pull-only.")
     push_markdown_parser.add_argument("--confirm-replace", action="store_true", help="Required safety flag when updating an existing remote document.")
+    push_markdown_parser.add_argument("--upload-media", action="store_true", help="Upload standalone local Markdown image or attachment lines first and insert them as Feishu image/file blocks.")
+    push_markdown_parser.add_argument("--media-root", help="Optional base directory used to resolve relative local media paths when --upload-media is enabled.")
     push_markdown_parser.add_argument("--app-id", help="Feishu app id. Defaults to FEISHU_APP_ID.")
     push_markdown_parser.add_argument("--app-secret", help="Feishu app secret. Defaults to FEISHU_APP_SECRET.")
     push_markdown_parser.add_argument("--base-url", help="Feishu base URL. Defaults to FEISHU_BASE_URL or https://open.feishu.cn.")
@@ -9206,14 +10026,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     push_dir_parser = subparsers.add_parser(
         "push-dir",
-        help="Push a Markdown directory to Feishu and write back feishu-index.json.",
+        help="Push a Markdown directory to Feishu and write back the current auth-mode Feishu index file.",
     )
     push_dir_parser.add_argument("path", help="Path to the Markdown directory.")
-    push_dir_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
+    push_dir_parser.add_argument("--index-path", help="Optional auth-mode-aware Feishu index override path.")
     push_dir_parser.add_argument("--folder-token", help="Optional folder token override used when creating new docs.")
     push_dir_parser.add_argument("--keep-front-matter", action="store_true", help="Do not strip YAML front matter when reading Markdown files.")
     push_dir_parser.add_argument("--ignore-sync-direction", action="store_true", help="Push even if a file is currently marked pull-only.")
     push_dir_parser.add_argument("--confirm-replace", action="store_true", help="Required safety flag when updating existing remote documents.")
+    push_dir_parser.add_argument("--upload-media", action="store_true", help="Upload standalone local Markdown image or attachment lines first and insert them as Feishu image/file blocks.")
+    push_dir_parser.add_argument("--media-root", help="Optional base directory used to resolve relative local media paths when --upload-media is enabled.")
     push_dir_parser.add_argument("--continue-on-error", action="store_true", help="Continue processing remaining files after a failure.")
     push_dir_parser.add_argument("--mirror-remote-folders", action="store_true", help="Mirror the local directory tree into remote Feishu folders when creating new docs without an explicit folder token.")
     push_dir_parser.add_argument("--app-id", help="Feishu app id. Defaults to FEISHU_APP_ID.")
@@ -9233,7 +10055,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pull_dir_parser.add_argument("path", help="Local output root directory.")
     pull_dir_parser.add_argument("--folder-token", help="Optional starting folder token. Defaults to the resolved current token-visible root folder.")
-    pull_dir_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
+    pull_dir_parser.add_argument("--index-path", help="Optional auth-mode-aware Feishu index override path.")
     pull_dir_parser.add_argument("--overwrite", action="store_true", help="Overwrite local Markdown files when they already exist.")
     pull_dir_parser.add_argument("--continue-on-error", action="store_true", help="Continue processing remaining remote docs after a failure.")
     pull_dir_parser.add_argument("--no-recursive", dest="recursive", action="store_false", help="Only read the top-level folder instead of walking nested folders.")
@@ -9257,7 +10079,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_dir_parser.add_argument("path", help="Local Markdown sync root.")
     sync_dir_parser.add_argument("--folder-token", help="Optional starting remote folder token. Defaults to the app-visible root folder.")
-    sync_dir_parser.add_argument("--index-path", help="Optional feishu-index.json override path.")
+    sync_dir_parser.add_argument("--index-path", help="Optional auth-mode-aware Feishu index override path.")
     sync_dir_parser.add_argument("--dry-run", action="store_true", help="Build a plan without executing remote deletes or index cleanup.")
     sync_dir_parser.add_argument("--prune", action="store_true", help="Include prune candidates in planning; with --confirm-prune and no --dry-run, execute the prune candidates.")
     sync_dir_parser.add_argument("--confirm-prune", action="store_true", help="Required safety flag before sync-dir executes remote prune deletes and index cleanup.")

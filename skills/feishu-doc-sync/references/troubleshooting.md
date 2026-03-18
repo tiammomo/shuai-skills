@@ -1,5 +1,19 @@
 # Troubleshooting
 
+## Contents
+
+- [Missing App Credentials Or Token Inputs](#missing-app-credentials-or-token-inputs)
+- [`20029 redirect_uri` Request Is Invalid](#20029-redirect_uri-request-is-invalid)
+- [Tenant Auth Succeeds But The Document Is Still Invisible](#tenant-auth-succeeds-but-the-document-is-still-invisible)
+- [`403` Or `1770032` Forbidden While Reading Or Writing](#403-or-1770032-forbidden-while-reading-or-writing)
+- [Create Document Fails When `folder_token` Is Set](#create-document-fails-when-folder_token-is-set)
+- [`replace-markdown` Refuses To Run](#replace-markdown-refuses-to-run)
+- [`push-markdown` Or `push-dir` Partially Succeeds](#push-markdown-or-push-dir-partially-succeeds)
+- [Read Works But Block Writes Hit Rate Limits](#read-works-but-block-writes-hit-rate-limits)
+- [Markdown Convert Followed By Block Insert Fails](#markdown-convert-followed-by-block-insert-fails)
+- [Pull Fidelity Looks Poor](#pull-fidelity-looks-poor)
+- [Secret Was Pasted Into Chat Or Shell History](#secret-was-pasted-into-chat-or-shell-history)
+
 ## Missing App Credentials Or Token Inputs
 
 Symptoms:

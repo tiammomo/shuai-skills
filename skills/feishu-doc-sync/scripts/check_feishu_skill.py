@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import base64
 import json
@@ -17,12 +18,37 @@ import time
 import urllib.request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "feishu_doc_sync.py"
+
+
+def default_validator_path() -> Path:
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    return codex_home / "skills" / ".system" / "skill-creator" / "scripts" / "quick_validate.py"
+
+
+def resolve_validator_path(raw_path: str) -> Path:
+    return Path(raw_path).expanduser().resolve()
+
+
+def run_step(label: str, command: List[str]) -> None:
+    print(f"==> {label}")
+    completed = subprocess.run(
+        command,
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
+    if completed.stderr:
+        print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", file=sys.stderr)
+    if completed.returncode != 0:
+        raise SystemExit(completed.returncode)
 
 
 def run_cli(*args: str, env: Optional[Dict[str, str]] = None) -> str:
@@ -127,6 +153,10 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
                 "blk-root-a-ordered",
                 "blk-root-a-quote",
                 "blk-root-a-code",
+                "blk-root-a-callout",
+                "blk-root-a-table",
+                "blk-root-a-image",
+                "blk-root-a-file",
             ],
             "url": "https://example.test/docx/dox-root-a",
             "raw_content": "Mock Root Doc A\nRoot A content.\n",
@@ -141,6 +171,10 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
                         "blk-root-a-ordered",
                         "blk-root-a-quote",
                         "blk-root-a-code",
+                        "blk-root-a-callout",
+                        "blk-root-a-table",
+                        "blk-root-a-image",
+                        "blk-root-a-file",
                     ],
                     "page": {
                         "elements": [
@@ -255,6 +289,113 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
                         "content": "echo \"smoke\"\npython -m py_compile",
                     },
                 },
+                {
+                    "block_id": "blk-root-a-callout",
+                    "block_type": 19,
+                    "parent_id": "dox-root-a",
+                    "children": ["blk-root-a-callout-text"],
+                    "callout": {
+                        "background_color": 4,
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-callout-text",
+                    "block_type": 2,
+                    "parent_id": "blk-root-a-callout",
+                    "children": [],
+                    "text": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Review this callout.",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-table",
+                    "block_type": 31,
+                    "parent_id": "dox-root-a",
+                    "children": ["blk-root-a-cell-1", "blk-root-a-cell-2"],
+                    "table": {
+                        "cells": ["blk-root-a-cell-1", "blk-root-a-cell-2"],
+                        "property": {
+                            "row_size": 1,
+                            "column_size": 2,
+                        },
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-cell-1",
+                    "block_type": 32,
+                    "parent_id": "blk-root-a-table",
+                    "children": ["blk-root-a-cell-1-text"],
+                    "table_cell": {},
+                },
+                {
+                    "block_id": "blk-root-a-cell-1-text",
+                    "block_type": 2,
+                    "parent_id": "blk-root-a-cell-1",
+                    "children": [],
+                    "text": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Column A",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-cell-2",
+                    "block_type": 32,
+                    "parent_id": "blk-root-a-table",
+                    "children": ["blk-root-a-cell-2-text"],
+                    "table_cell": {},
+                },
+                {
+                    "block_id": "blk-root-a-cell-2-text",
+                    "block_type": 2,
+                    "parent_id": "blk-root-a-cell-2",
+                    "children": [],
+                    "text": {
+                        "elements": [
+                            {
+                                "text_run": {
+                                    "content": "Column B",
+                                    "text_element_style": {},
+                                }
+                            }
+                        ]
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-image",
+                    "block_type": 27,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "image": {
+                        "token": "box-root-a-image",
+                        "caption": {
+                            "content": "Architecture diagram",
+                        },
+                    },
+                },
+                {
+                    "block_id": "blk-root-a-file",
+                    "block_type": 23,
+                    "parent_id": "dox-root-a",
+                    "children": [],
+                    "file": {
+                        "token": "box-root-a-file",
+                        "name": "Architecture.pdf",
+                        "view_type": 1,
+                    },
+                },
             ],
         },
         "dox-root-b": {
@@ -345,6 +486,7 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
     folder_counter = 0
     media_counter = 0
     media_uploads = []
+    descendant_requests = []
 
     @classmethod
     def _ensure_folder_bucket(cls, folder_token: str) -> list[dict]:
@@ -653,6 +795,12 @@ class MockFeishuHandler(BaseHTTPRequestHandler):
             parts = parsed.path.strip("/").split("/")
             document_id = parts[4]
             payload = self._read_json_body()
+            MockFeishuHandler.descendant_requests.append(
+                {
+                    "document_id": document_id,
+                    "payload": payload,
+                }
+            )
             temp_children = payload.get("children_id", [])
             if not isinstance(temp_children, list):
                 temp_children = []
@@ -869,9 +1017,7 @@ def start_mock_server() -> Tuple[ThreadingHTTPServer, str]:
     return server, f"http://{host}:{port}"
 
 
-def main() -> int:
-    run_cli("--help")
-
+def run_selftest() -> None:
     doctor = json.loads(run_cli("doctor"))
     if "required_env" not in doctor.get("result", {}):
         raise RuntimeError("doctor output is missing required_env")
@@ -1191,9 +1337,15 @@ def main() -> int:
             )
             if not user_push_result.get("ok") or user_push_result.get("mode") != "user":
                 raise RuntimeError(f"Unexpected user-mode push-markdown result: {user_push_result}")
-            user_push_index_payload = json.loads((user_push_root / "feishu-index.json").read_text(encoding="utf-8"))
-            if user_push_index_payload.get("files", [{}])[0].get("doc_token") != "dox-mock":
+            user_push_index = user_push_root / "feishu-index.user.json"
+            if not user_push_index.is_file() or (user_push_root / "feishu-index.json").exists():
+                raise RuntimeError("user-mode push-markdown should write to feishu-index.user.json and keep the generic tenant index untouched by default")
+            user_push_index_payload = json.loads(user_push_index.read_text(encoding="utf-8"))
+            user_push_entry = user_push_index_payload.get("files", [{}])[0]
+            if user_push_entry.get("doc_token") != "dox-mock":
                 raise RuntimeError(f"user-mode push-markdown did not persist the mapped doc token: {user_push_index_payload}")
+            if user_push_index_payload.get("auth_mode") != "user" or user_push_entry.get("auth_mode") != "user":
+                raise RuntimeError(f"user-mode push-markdown did not persist user-mode scope metadata: {user_push_index_payload}")
 
             blocked_user_create_file = user_push_root / "blocked-create.md"
             blocked_user_create_file.write_text("# Blocked Create\n\nNo remote mapping yet.\n", encoding="utf-8")
@@ -1403,10 +1555,15 @@ def main() -> int:
                 raise RuntimeError(f"Unexpected user-mode push-dir mapped update result: {user_push_dir_result}")
             if user_push_dir_result.get("result", {}).get("pushed_count") != 1:
                 raise RuntimeError(f"user-mode push-dir mapped update did not push one file: {user_push_dir_result}")
-            user_push_dir_index_payload = json.loads((user_push_dir_root / "feishu-index.json").read_text(encoding="utf-8"))
+            user_push_dir_index = user_push_dir_root / "feishu-index.user.json"
+            if not user_push_dir_index.is_file() or (user_push_dir_root / "feishu-index.json").exists():
+                raise RuntimeError("user-mode push-dir should write to feishu-index.user.json by default")
+            user_push_dir_index_payload = json.loads(user_push_dir_index.read_text(encoding="utf-8"))
             user_push_dir_entry = user_push_dir_index_payload.get("files", [{}])[0]
             if user_push_dir_entry.get("doc_token") != "dox-user-dir-mapped":
                 raise RuntimeError(f"user-mode push-dir mapped update did not preserve the mapped doc token: {user_push_dir_index_payload}")
+            if user_push_dir_entry.get("auth_mode") != "user" or user_push_dir_entry.get("visibility_scope") != "user_visible":
+                raise RuntimeError(f"user-mode push-dir mapped update did not persist user scope metadata: {user_push_dir_index_payload}")
 
             blocked_user_create_dir_root = Path(tmp_dir) / "user-push-dir-blocked"
             (blocked_user_create_dir_root / "Guides" / "API").mkdir(parents=True, exist_ok=True)
@@ -1644,6 +1801,11 @@ def main() -> int:
                 "> Important note from the block tree.",
                 "```bash",
                 "echo \"smoke\"",
+                "> [!CALLOUT]",
+                "> Review this callout.",
+                "| Column A | Column B |",
+                "![Architecture diagram](feishu-media:box-root-a-image)",
+                "[Architecture.pdf](feishu-file:box-root-a-file)",
             ):
                 if expected_fragment not in high_pulled_text:
                     raise RuntimeError(f"High-fidelity pull-markdown missed expected content {expected_fragment!r}: {high_pulled_text}")
@@ -1773,6 +1935,54 @@ def main() -> int:
                 raise RuntimeError(f"upload-media did not preserve document routing fields: {last_upload}")
             if last_upload.get("file_name") != "architecture.png" or last_upload.get("size") != str(media_file.stat().st_size):
                 raise RuntimeError(f"upload-media did not preserve file metadata: {last_upload}")
+
+            media_push_root = Path(tmp_dir) / "push-media"
+            (media_push_root / "assets").mkdir(parents=True, exist_ok=True)
+            (media_push_root / "assets" / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\nmedia-image-data")
+            (media_push_root / "assets" / "spec.pdf").write_bytes(b"%PDF-1.4 mock attachment")
+            media_push_file = media_push_root / "media.md"
+            media_push_file.write_text(
+                "# Media Push\n\n"
+                "![Diagram](assets/diagram.png)\n\n"
+                "[Spec PDF](assets/spec.pdf)\n\n"
+                "Body after uploaded media.\n",
+                encoding="utf-8",
+            )
+            media_push_result = json.loads(
+                run_cli(
+                    "push-markdown",
+                    str(media_push_file),
+                    "--root",
+                    str(media_push_root),
+                    "--upload-media",
+                    "--app-id",
+                    "cli_mock",
+                    "--app-secret",
+                    "mock_secret",
+                    "--base-url",
+                    base_url,
+                )
+            )
+            if not media_push_result.get("ok"):
+                raise RuntimeError(f"Unexpected push-markdown --upload-media result: {media_push_result}")
+            media_push_payload = media_push_result.get("result", {})
+            media_backfill = (((media_push_payload.get("write") or {}).get("append") or {}).get("media_backfill") or {})
+            if media_backfill.get("uploaded_count") != 2:
+                raise RuntimeError(f"push-markdown --upload-media did not report the uploaded media count: {media_push_result}")
+            latest_uploads = MockFeishuHandler.media_uploads[-2:]
+            latest_parent_types = [item.get("parent_type") for item in latest_uploads]
+            if latest_parent_types != ["docx_image", "docx_file"]:
+                raise RuntimeError(f"push-markdown --upload-media did not route image and attachment uploads correctly: {latest_uploads}")
+            latest_descendant_request = MockFeishuHandler.descendant_requests[-1] if MockFeishuHandler.descendant_requests else {}
+            descendants = ((latest_descendant_request.get("payload") or {}).get("descendants") or [])
+            image_blocks = [item for item in descendants if isinstance(item, dict) and item.get("block_type") == 27]
+            file_blocks = [item for item in descendants if isinstance(item, dict) and item.get("block_type") == 23]
+            if not image_blocks or not file_blocks:
+                raise RuntimeError(f"push-markdown --upload-media did not synthesize image/file blocks: {latest_descendant_request}")
+            if not str((image_blocks[0].get("image") or {}).get("token") or "").startswith("box-mock-"):
+                raise RuntimeError(f"Media image block did not carry the uploaded token: {image_blocks[0]}")
+            if not str((file_blocks[0].get("file") or {}).get("token") or "").startswith("box-mock-"):
+                raise RuntimeError(f"Media attachment block did not carry the uploaded token: {file_blocks[0]}")
 
             sync_root = Path(tmp_dir) / "sync-root"
             sync_root.mkdir(parents=True, exist_ok=True)
@@ -2003,6 +2213,12 @@ def main() -> int:
                 raise RuntimeError(f"user-mode sync-dir execution did not run one push and one pull: {user_sync_execute_result}")
             if "Remote revision that should be pulled by the user-mode sync." not in (user_sync_root / "pull-user.md").read_text(encoding="utf-8"):
                 raise RuntimeError(f"user-mode sync-dir execution did not pull the remote content into the local file: {user_sync_execute_result}")
+            migrated_user_sync_index = user_sync_root / "feishu-index.user.json"
+            if not migrated_user_sync_index.is_file():
+                raise RuntimeError("user-mode sync-dir execution should migrate writes into feishu-index.user.json when only a legacy generic index existed")
+            migrated_user_sync_payload = json.loads(migrated_user_sync_index.read_text(encoding="utf-8"))
+            if migrated_user_sync_payload.get("auth_mode") != "user":
+                raise RuntimeError(f"user-mode sync-dir execution did not tag the migrated index with user scope metadata: {migrated_user_sync_payload}")
 
             user_sync_create_root = Path(tmp_dir) / "user-sync-create-root"
             user_sync_create_root.mkdir(parents=True, exist_ok=True)
@@ -2069,7 +2285,7 @@ def main() -> int:
             user_sync_create_summary = user_sync_create_result.get("result", {}).get("summary", {})
             if user_sync_create_summary.get("pushed_count") != 1 or user_sync_create_summary.get("created_count") != 1:
                 raise RuntimeError(f"user-mode sync-dir create flow did not report one created push: {user_sync_create_result}")
-            user_sync_create_index_payload = json.loads((user_sync_create_root / "feishu-index.json").read_text(encoding="utf-8"))
+            user_sync_create_index_payload = json.loads((user_sync_create_root / "feishu-index.user.json").read_text(encoding="utf-8"))
             user_sync_create_entry = user_sync_create_index_payload.get("files", [{}])[0]
             if not str(user_sync_create_entry.get("doc_token") or "").startswith("dox-created-"):
                 raise RuntimeError(f"user-mode sync-dir create flow did not persist the created doc token: {user_sync_create_index_payload}")
@@ -2786,7 +3002,43 @@ def main() -> int:
             server.shutdown()
             server.server_close()
 
-    print("feishu-doc-sync scaffold checks passed.")
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run offline checks for the Feishu Doc Sync skill.")
+    parser.add_argument("--validator", default=str(default_validator_path()), help="Path to skill-creator quick_validate.py.")
+    parser.add_argument("--skip-selftest", action="store_true", help="Skip the offline Feishu mock self-tests.")
+    parser.add_argument("--skip-validate", action="store_true", help="Skip skill-creator validation.")
+    parser.add_argument("--skip-help-smoke", action="store_true", help="Skip CLI --help smoke tests.")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    if not args.skip_selftest:
+        print("==> Offline self-tests")
+        run_selftest()
+        print("Feishu offline self-tests passed.")
+
+    if not args.skip_validate:
+        validator_path = resolve_validator_path(args.validator)
+        if not validator_path.exists():
+            raise SystemExit(f"Validator script not found: {validator_path}. Pass --validator or --skip-validate.")
+        run_step("Skill validation", [sys.executable, str(validator_path), str(ROOT)])
+
+    if not args.skip_help_smoke:
+        help_commands = [
+            ("CLI help", [sys.executable, str(CLI), "--help"]),
+            ("Tenant validate help", [sys.executable, str(CLI), "validate-tenant", "--help"]),
+            ("User validate help", [sys.executable, str(CLI), "validate-user", "--help"]),
+            ("Directory sync help", [sys.executable, str(CLI), "sync-dir", "--help"]),
+            ("Directory push help", [sys.executable, str(CLI), "push-dir", "--help"]),
+            ("Authorize-local help", [sys.executable, str(CLI), "authorize-local", "--help"]),
+        ]
+        for label, command in help_commands:
+            run_step(label, command)
+
+    print("All Feishu skill checks passed.")
     return 0
 
 

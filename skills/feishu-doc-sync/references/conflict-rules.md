@@ -1,5 +1,16 @@
 # Conflict Rules
 
+## Contents
+
+- [Default Stance](#default-stance)
+- [Recommended Modes](#recommended-modes)
+- [Suggested Conflict Inputs](#suggested-conflict-inputs)
+- [What The Current Scaffold Does](#what-the-current-scaffold-does)
+- [Current Dry-Run Conflict Detection](#current-dry-run-conflict-detection)
+- [Current Diff Preview Surface](#current-diff-preview-surface)
+- [Protected Bidirectional Execution](#protected-bidirectional-execution)
+- [Safe Resolution Patterns](#safe-resolution-patterns)
+
 ## Default Stance
 
 - Do not auto-merge local Markdown and remote Feishu edits by default.

@@ -1,5 +1,18 @@
 # Sync Rules
 
+## Contents
+
+- [Current Scaffold Boundary](#current-scaffold-boundary)
+- [Mapping Sources](#mapping-sources)
+- [Recommended Front Matter](#recommended-front-matter)
+- [Recommended Directory Index](#recommended-directory-index)
+- [Planning Rules](#planning-rules)
+- [Live Push Rules](#live-push-rules)
+- [Live Pull Rules](#live-pull-rules)
+- [Title Resolution](#title-resolution)
+- [Commands](#commands)
+- [Safe Extension Order](#safe-extension-order)
+
 ## Current Scaffold Boundary
 
 - The bundled CLI now supports both planning and a first live tenant-mode execution path.
@@ -14,7 +27,7 @@
 The scaffold resolves mapping in this order:
 
 1. Front matter inside the Markdown file
-2. Matching entry in `feishu-index.json`
+2. Matching entry in the current auth-mode index file
 3. Fallback defaults derived from the file path and title
 
 ## Recommended Front Matter
@@ -41,9 +54,11 @@ Recommended fields:
 
 ## Recommended Directory Index
 
-Use `feishu-index.json` at the sync root for directory jobs.
+Use an auth-mode-aware index file at the sync root for directory jobs.
 
-Current tenant-mode push commands also write back to this file automatically.
+Current tenant-mode commands write back to `feishu-index.json`.
+
+Current user-mode commands write back to `feishu-index.user.json` by default, and can still read legacy unscoped mappings from a sibling `feishu-index.json` while migrating.
 
 Example:
 
@@ -107,6 +122,8 @@ For `push-markdown`:
 - If a doc token already exists, the command uses `replace-markdown` to clear and rewrite the remote document body.
 - Existing-doc updates require `--confirm-replace`.
 - If no doc token exists, the command creates a new document, appends Markdown content, and writes the returned token back to `feishu-index.json`.
+- With `--upload-media`, standalone local Markdown image or attachment lines are uploaded first and then inserted as Feishu image or file blocks in the final write payload.
+- `--media-root` can override the default per-file asset resolution root when relative media paths should be resolved from a shared directory.
 - By default, YAML front matter is stripped before writing.
 - Files marked `pull` are skipped unless you pass `--ignore-sync-direction`.
 - `body_hash` and `baseline_body_snapshot` now track the Markdown body without front matter so later drift checks and semantic merge suggestions compare the same surface.
@@ -116,6 +133,7 @@ For `replace-markdown`:
 
 - The current implementation replaces root-level document body content.
 - It clears existing root children first, then appends converted Markdown blocks.
+- With `--upload-media`, standalone local Markdown image or attachment lines are uploaded first and then inserted as Feishu image or file blocks in the replacement payload.
 - It is intentionally destructive and therefore requires `--confirm-replace`.
 
 For `push-dir`:
@@ -123,8 +141,10 @@ For `push-dir`:
 - The command walks every `*.md` file under the target directory.
 - It reuses the same mapping rules as `plan-dir`.
 - It writes or updates `feishu-index.json` incrementally as each file succeeds.
+- In user mode, the default write target is `feishu-index.user.json` so one user's visible mappings do not overwrite tenant-visible mappings in the same directory tree.
 - It skips pull-only files unless `--ignore-sync-direction` is passed.
 - It stops on the first failure unless `--continue-on-error` is passed.
+- With `--upload-media`, each file can upload standalone local Markdown image or attachment lines into its destination doc workflow before the final block write.
 - With `--mirror-remote-folders`, files that would otherwise create docs in the root folder derive a remote folder path from the local relative directory.
 - With `--mirror-remote-folders --folder-token <fld>`, the supplied folder token is treated as the mirror root, not as a hard per-file override.
 - Explicit `feishu_folder_token` or index `folder_token` mappings still win over derived folder paths for that file.
@@ -139,6 +159,7 @@ For `pull-markdown`:
 - With `--fidelity high`, it also lists the document block tree and rebuilds Markdown for common block types.
 - Existing local files require `--overwrite`.
 - `--root` and `--index-path` enable `feishu-index.json` write-back automatically.
+- In user mode, the default write-back path becomes `feishu-index.user.json`.
 
 For `pull-dir`:
 
@@ -147,6 +168,7 @@ For `pull-dir`:
 - Existing index mappings win over derived remote paths when deciding where to write local files.
 - Otherwise local paths are derived from remote folder names and document titles.
 - It writes or updates `feishu-index.json` incrementally as each export succeeds.
+- In user mode, the default write-back path becomes `feishu-index.user.json`.
 - It stops on the first failure unless `--continue-on-error` is passed.
 
 For `sync-dir --dry-run --detect-conflicts`:
@@ -197,7 +219,9 @@ Single-file doctor and planning:
 Single-file live push:
 
 - `python scripts/feishu_doc_sync.py push-markdown path/to/file.md`
+- `python scripts/feishu_doc_sync.py push-markdown path/to/file.md --upload-media`
 - `python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --markdown-file path/to/file.md --confirm-replace`
+- `python scripts/feishu_doc_sync.py replace-markdown doxxxxxxxxxxxxxxxxxxxxxxxxx --markdown-file path/to/file.md --confirm-replace --upload-media`
 
 Single-file live pull:
 
@@ -218,6 +242,7 @@ Directory planning:
 Directory live execution:
 
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir`
+- `python scripts/feishu_doc_sync.py push-dir path/to/dir --upload-media`
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir --confirm-replace`
 - `python scripts/feishu_doc_sync.py push-dir path/to/dir --folder-token fldxxxxxxxxxxxxxxxxxxxxxxxxx --mirror-remote-folders`
 - `python scripts/feishu_doc_sync.py sync-dir path/to/dir --execute-bidirectional --confirm-bidirectional`

@@ -1,5 +1,20 @@
 # Auth and Permissions
 
+## Contents
+
+- [Recommended App Model](#recommended-app-model)
+- [Mode Split](#mode-split)
+- [Required Environment](#required-environment)
+- [Current CLI Coverage](#current-cli-coverage)
+- [Stable Output Contract](#stable-output-contract)
+- [Scope Matrix](#scope-matrix)
+- [Non-Scope Access Requirements](#non-scope-access-requirements)
+- [OAuth Notes For User Tokens](#oauth-notes-for-user-tokens)
+- [Recommended Live Validation Order](#recommended-live-validation-order)
+- [How To Enable In Feishu](#how-to-enable-in-feishu)
+- [Example Assets](#example-assets)
+- [Official Sources](#official-sources)
+
 ## Recommended App Model
 
 - Start with a custom Feishu app for internal Markdown sync jobs.

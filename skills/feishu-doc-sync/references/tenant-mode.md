@@ -1,5 +1,19 @@
 # Tenant Mode
 
+## Contents
+
+- [What This Mode Means](#what-this-mode-means)
+- [What The App Can See](#what-the-app-can-see)
+- [Current Capability In This Repo](#current-capability-in-this-repo)
+- [What You Can Do Right Now](#what-you-can-do-right-now)
+- [Recommended Workflow](#recommended-workflow)
+- [Verification Loop](#verification-loop)
+- [Best Fit](#best-fit)
+- [Limits](#limits)
+- [Commands To Start With](#commands-to-start-with)
+- [Current Boundaries](#current-boundaries)
+- [Related Docs](#related-docs)
+
 ## What This Mode Means
 
 Tenant mode uses `tenant_access_token`, so the app acts as itself.
@@ -63,6 +77,7 @@ With the current tenant-mode CLI, you can already:
 - replace one existing document body with local Markdown
 - push one local Markdown file and write back `feishu-index.json`
 - push a Markdown directory and write back `feishu-index.json`
+- backfill standalone local Markdown image or attachment lines during append, replace, `push-markdown`, or `push-dir` when `--upload-media` is enabled
 - mirror local subdirectories into remote Feishu folders when new docs are created during `push-dir`
 - strip YAML front matter from local Markdown files by default before conversion, including UTF-8 BOM files commonly produced on Windows
 - enumerate files visible under the app-visible root or a supplied folder token
@@ -82,9 +97,10 @@ This is enough for a solid tenant-mode verification loop and a first real Markdo
 8. Use `sync-dir --dry-run` before mixing existing local mappings with remote visibility.
 9. Use `sync-dir --prune --confirm-prune` only after reviewing the plan and confirming the backup location.
 10. Use `append-markdown`, `replace-markdown`, or `push-markdown` to push local Markdown into the target document.
-11. Use `push-dir` when you are ready to execute a directory-level tenant push with index write-back.
-12. Add `--mirror-remote-folders` when new docs should land under remote folders derived from the local directory tree.
-13. Use `get-raw-content` again to verify the remote result.
+11. Add `--upload-media` when standalone local Markdown image or attachment lines should become uploaded Feishu image or file blocks during the write.
+12. Use `push-dir` when you are ready to execute a directory-level tenant push with index write-back.
+13. Add `--mirror-remote-folders` when new docs should land under remote folders derived from the local directory tree.
+14. Use `get-raw-content` again to verify the remote result.
 
 ## Verification Loop
 
@@ -183,6 +199,7 @@ Tenant mode is now strong enough for:
 - opt-in protected execution for safe semantic auto-merge, unmapped remote adoption, and local create flow in bidirectional mode
 - guarded prune execution for index-mapped remote docs with local backups and index cleanup
 - explicit media upload into docx workflows with returned `file_token`
+- standalone local Markdown media backfill into Feishu image or file blocks during write flows when `--upload-media` is enabled
 - app-visible Markdown append into existing docs
 - app-visible document body replacement for existing docs
 - app-visible single-file push with automatic `feishu-index.json` write-back
@@ -197,7 +214,7 @@ Tenant mode in this repo still does not yet cover:
 - user-personal visibility
 - automatic resolution for overlapping or ambiguous bidirectional conflicts
 - round-trip fidelity guarantees for every block type
-- automatic embedded asset rewrite and richer media round-tripping
+- richer inline-media rewrite beyond standalone Markdown lines and broader embedded asset round-tripping
 
 ## Related Docs
 

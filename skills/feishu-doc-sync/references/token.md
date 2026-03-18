@@ -1,5 +1,19 @@
 # Token Guide
 
+## Contents
+
+- [Which Token To Use](#which-token-to-use)
+- [Recommended Default](#recommended-default)
+- [Mode Quick Pick](#mode-quick-pick)
+- [Current CLI Commands](#current-cli-commands)
+- [Self-Built App Token Docs](#self-built-app-token-docs)
+- [User Token Docs](#user-token-docs)
+- [Token Selection Reference](#token-selection-reference)
+- [What To Put In Env Vars](#what-to-put-in-env-vars)
+- [Practical Decision Table](#practical-decision-table)
+- [Important Feishu Constraint](#important-feishu-constraint)
+- [Secret Safety](#secret-safety)
+
 ## Which Token To Use
 
 For Feishu document sync, the practical choices are:

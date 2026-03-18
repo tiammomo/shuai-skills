@@ -1,5 +1,17 @@
 # Pull and Export
 
+## Contents
+
+- [Current Pull Boundary](#current-pull-boundary)
+- [`pull-markdown`](#pull-markdown)
+- [`pull-dir`](#pull-dir)
+- [`sync-dir --dry-run`](#sync-dir---dry-run)
+- [`sync-dir --execute-bidirectional --confirm-bidirectional`](#sync-dir---execute-bidirectional---confirm-bidirectional)
+- [`sync-dir --prune --confirm-prune`](#sync-dir---prune---confirm-prune)
+- [`upload-media`](#upload-media)
+- [Recommended Usage Order](#recommended-usage-order)
+- [Next Planned Improvements](#next-planned-improvements)
+
 ## Current Pull Boundary
 
 The current tenant-mode pull path now supports two fidelity levels:
@@ -172,7 +184,7 @@ Current safety boundary:
 
 ## `upload-media`
 
-Use `upload-media` when a local image or attachment should be pushed into a Feishu document workflow before richer Markdown media mapping is automated.
+Use `upload-media` when a local image or attachment should be pushed into a Feishu document workflow on its own, or use `append-markdown`, `replace-markdown`, `push-markdown`, or `push-dir` with `--upload-media` when standalone local Markdown image or attachment lines should be backfilled automatically during the write.
 
 Example:
 
@@ -186,11 +198,12 @@ Current behavior:
 - defaults to `parent_type=docx_image`
 - returns the Feishu `file_token`
 - optionally forwards `extra.drive_route_token` when a routed upload path is needed
+- write commands can now reuse the same media upload path to backfill standalone local Markdown image or attachment lines before descendant block creation
 
 Current safety boundary:
 
-- the command uploads media but does not yet rewrite Markdown image references automatically
-- downstream block insertion still has to decide how uploaded `file_token` values become image or attachment blocks
+- automatic backfill currently focuses on standalone Markdown image or attachment lines, not inline links or raw HTML assets
+- richer inline-media rewriting and broader embedded asset round-tripping still need more work
 
 ## Recommended Usage Order
 
@@ -200,12 +213,12 @@ Current safety boundary:
 4. `sync-dir --dry-run`
 5. `sync-dir --execute-bidirectional --confirm-bidirectional` when the reviewed bidirectional plan is clean
 6. `sync-dir --prune --confirm-prune` when a reviewed prune plan should be executed
-7. `upload-media` when the job needs image or attachment tokens before richer push automation lands
+7. `upload-media` when the job needs image or attachment tokens directly, or `push-markdown/push-dir --upload-media` when standalone local Markdown media refs should be backfilled during the write
 
 ## Next Planned Improvements
 
 - broader block-tree export coverage with fewer unsupported placeholders
-- automatic Markdown image and attachment wiring on push
+- broader inline Markdown image and attachment wiring on push
 - richer remote restore artifacts for prune backups
 - richer semantic merge guidance on top of the current semantic preview
 - broader bidirectional execution across unmapped remote pull candidates and safer create flows

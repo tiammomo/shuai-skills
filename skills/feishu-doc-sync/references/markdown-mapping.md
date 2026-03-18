@@ -1,5 +1,19 @@
 # Markdown Mapping
 
+## Contents
+
+- [Recommended Feishu Pipeline](#recommended-feishu-pipeline)
+- [Current Live-Validated Subset](#current-live-validated-subset)
+- [Current Mapping Rules](#current-mapping-rules)
+- [Current Feishu Pipeline Behavior](#current-feishu-pipeline-behavior)
+- [Known Lossy Areas](#known-lossy-areas)
+- [Table Handling](#table-handling)
+- [Images And Attachments](#images-and-attachments)
+- [Pull Strategy](#pull-strategy)
+- [Example Assets](#example-assets)
+- [Source Of Truth Recommendation](#source-of-truth-recommendation)
+- [Official Sources](#official-sources)
+
 ## Recommended Feishu Pipeline
 
 The current tenant-mode write path follows the official Feishu docx sequence:
@@ -24,6 +38,7 @@ These parts are already covered by local smoke checks and tenant-mode live probe
 - destructive body replacement with `replace-markdown --confirm-replace`
 - single-file push with `push-markdown`
 - directory push with `push-dir`
+- `--upload-media` backfill for standalone local Markdown image or attachment lines during append, replace, single-file push, and directory push
 - single-file low-fidelity export with `pull-markdown --fidelity low`
 - single-file higher-fidelity export for common blocks with `pull-markdown --fidelity high`
 - directory low-fidelity export with `pull-dir --fidelity low`
@@ -65,6 +80,7 @@ Default content behavior:
 `append-markdown`:
 
 - converts Markdown to blocks
+- with `--upload-media`, uploads standalone local Markdown image or attachment lines first and inserts them as Feishu image or file blocks
 - appends those blocks under the selected parent block
 - does not clear existing content
 
@@ -72,6 +88,7 @@ Default content behavior:
 
 - lists the root page block
 - deletes the existing root children
+- with `--upload-media`, uploads standalone local Markdown image or attachment lines first and inserts them as Feishu image or file blocks
 - appends the converted Markdown blocks as the new body
 
 `push-markdown`:
@@ -79,12 +96,14 @@ Default content behavior:
 - resolves mapping from front matter and `feishu-index.json`
 - creates a new doc if no `doc_token` exists
 - otherwise requires `--confirm-replace` and overwrites the existing doc body
+- can use `--upload-media` to turn standalone local Markdown image or attachment lines into uploaded Feishu image or file blocks before writing
 - updates `feishu-index.json` after a successful write
 
 `push-dir`:
 
 - runs `push-markdown` for every Markdown file under the root
 - skips files marked `sync_direction: pull` unless overridden
+- can reuse `--upload-media` for each file so standalone local Markdown image or attachment lines are uploaded into the destination doc workflow
 - writes or updates one shared `feishu-index.json`
 
 ## Known Lossy Areas
@@ -93,8 +112,9 @@ Treat these as best-effort or not-yet-validated until the live implementation pr
 
 - task lists
 - tables with complex merges
-- images
-- attachments
+- inline image references inside paragraph text
+- inline attachment links inside paragraph text
+- non-standalone local media references that need richer Markdown rewriting than `--upload-media` currently performs
 - block quotes with higher-fidelity nesting expectations
 - custom admonition syntax
 - footnotes
@@ -130,7 +150,8 @@ This repository now implements an explicit live media-upload path in `feishu_doc
 Current boundary:
 
 - uploaded media can be pushed to a doc workflow and returns a `file_token`
-- automatic Markdown image or attachment rewrite during `push-markdown` / `push-dir` is not implemented yet
+- `append-markdown`, `replace-markdown`, `push-markdown`, and `push-dir` can now backfill standalone local Markdown image or attachment lines when `--upload-media` is enabled
+- the first media-backfill version intentionally focuses on standalone Markdown lines, not inline links or raw HTML asset references
 
 ## Pull Strategy
 
@@ -149,10 +170,11 @@ The current high-fidelity exporter is strongest for:
 - quotes
 - code blocks
 - todo items
-- simple callouts
+- simple callouts with nested text children
+- simple tables without advanced merge semantics
 - image and file placeholders that preserve Feishu tokens
 
-Treat tables, embeds, and other unsupported blocks as review-required output until the exporter coverage expands.
+Treat embeds, complex merged tables, and other unsupported blocks as review-required output until the exporter coverage expands.
 
 ## Example Assets
 

@@ -1,264 +1,202 @@
 # Skills 制作指南
 
-这篇文档面向“想在本仓库继续新增 skill 的人”，重点回答两个问题：
+这篇文档面向“想在本仓库继续新增或升级 skill 的人”。重点不是解释什么是 skill，而是给出一条可落地、可维护、符合渐进式设计的制作路径。
 
-- 一个 skill 应该怎么从 0 到 1 做出来。
-- 在这个仓库里，推荐按什么顺序推进，才能让 skill 可复用、可维护、可验证。
+如果你只想先做出一个最小版本，先看 [skill-quickstart.md](./skill-quickstart.md)；如果你想核对规则边界，再看 [skill-spec.md](./skill-spec.md)。
 
-如果你想先看规则和约束，再回来看操作步骤，可以搭配 [skill-spec.md](./skill-spec.md) 一起读；如果你只想先快速做出一个最小版本，可以先看 [skill-quickstart.md](./skill-quickstart.md)。
+## 制作目标
 
-## 先理解：skill 不是普通文档
+一个成熟 skill 至少应该满足这几件事：
 
-一个 skill 本质上是给另一个 Codex 实例使用的“任务说明 + 资源包”。它不是面向终端用户的产品文档，而是面向 agent 的可复用能力单元。
-
-在这个仓库里，一个成熟 skill 通常会包含这些内容：
-
-- `SKILL.md`：必须存在，是 skill 的入口。
-- `agents/openai.yaml`：推荐存在，用于 UI 展示和默认 prompt。
-- `scripts/`：需要稳定执行、反复复用时放脚本。
-- `references/`：需要按需加载的说明、规则、接口文档。
-- `assets/`：模板、示例文件、图标、输出资源等。
-
-本仓库当前的 [`skills/yuque-openapi/`](../skills/yuque-openapi/) 就是一个完整例子：
-
-- `SKILL.md` 负责告诉 agent 什么时候该用这个 skill。
-- `scripts/` 里放了可直接执行的 Yuque CLI 和检查脚本。
-- `references/` 里拆分了目录同步、TOC、manifest 等主题说明。
-- `assets/` 里放了批量任务 manifest 模板。
-- `agents/openai.yaml` 里放了 UI 展示信息。
+- 能被正确触发
+- `SKILL.md` 足够短，能做路由而不是堆文档
+- 复杂说明拆到了 `references/`
+- 可重复执行的逻辑沉淀到了 `scripts/`
+- 有最小可回归的检查入口
 
 ## 推荐制作流程
 
-### 1. 先定义清楚它解决什么任务
+### 1. 先收窄边界
 
-在动手建目录之前，先把 skill 的触发边界想清楚：
+开工前先回答四个问题：
 
-- 用户会说什么，触发这个 skill？
-- 这个 skill 解决的是单一任务，还是一类相近任务？
-- 哪些知识是模型本身不稳定、需要被显式教会的？
-- 哪些步骤会反复重写，值得沉淀为脚本或模板？
+1. 这个 skill 解决哪一类任务？
+2. 用户通常会怎么描述这个需求？
+3. 哪些知识是模型记忆不稳定、必须显式提供的？
+4. 哪些步骤适合做成脚本，而不是每次重写？
 
-如果这里没有想清楚，后面最容易出现两个问题：
+如果这一步没想清楚，最常见的问题就是：
 
-- skill 描述过泛，导致触发不准。
-- skill 内容过杂，变成一个什么都想包进去的大杂烩。
+- `description` 写得太泛，触发不准
+- `SKILL.md` 越写越长，最后变成总说明
 
-### 2. 把可复用资源先规划出来
+### 2. 先设计渐进式结构
 
-建议先按下面三类去想：
+在写任何文档之前，先确定三层内容怎么分：
 
-- `scripts/`
-  适合放可重复执行、容易写错、需要稳定输出的逻辑。
-- `references/`
-  适合放详细说明、接口文档、领域规则、公司内部约束。
-- `assets/`
-  适合放模板、样例、图标、输出资源，而不是给模型读的长文档。
+- frontmatter：只负责触发
+- `SKILL.md`：只负责路由、安全约束和默认工作流
+- `references/`、`scripts/`、`assets/`：按需进入
 
-可以用一个很直接的判断标准：
+一个很实用的判断标准：
 
-- 同样的代码会不会反复写？
-  会，就考虑放进 `scripts/`。
-- 说明内容会不会很长，而且不是每次都要读？
-  会，就考虑放进 `references/`。
-- 这个文件主要是被复制、渲染、引用，而不是被读进上下文？
-  是，就考虑放进 `assets/`。
+- 需要稳定执行、会反复复用：放 `scripts/`
+- 很长、不是每次都要读：放 `references/`
+- 用于输出，不是用于加载到上下文：放 `assets/`
+
+如果 reference 文件会长到难以快速扫读，默认在顶部补一个 `## Contents`。本仓库当前把“超过 100 行的 reference 必须带 `## Contents`，而且要覆盖后续所有二级章节”作为渐进式导航基线。
+
+同时把 reference 的可达性也当成结构约束：每个 `references/*.md` 都应该能从 `SKILL.md` 直达，或者通过一个已经在 `SKILL.md` 暴露的 reference 路由页在两跳内到达。不要让 reference 再继续套 reference，最后只有深层链路才能找到。
 
 ### 3. 初始化 skill 目录
 
-如果是新 skill，推荐直接使用 `skill-creator` 的初始化脚本生成骨架，再手工完善。
-
-示例：
+建议用 `skill-creator` 初始化骨架：
 
 ```text
-python <CODEX_HOME>/skills/.system/skill-creator/scripts/init_skill.py my-skill --path skills --resources scripts,references,assets
+python <CODEX_HOME>/skills/.system/skill-creator/scripts/init_skill.py my-skill --path skills --resources scripts,references,assets --interface display_name="My Skill" --interface short_description="Short UI summary." --interface default_prompt="Use $my-skill to handle the target workflow."
 ```
 
-常见参数含义：
+如果 skill 很轻，也可以不一次性建全所有目录。
 
-- `my-skill`
-  skill 名称，会被规范化成小写连字符形式。
-- `--path skills`
-  把 skill 创建在本仓库的 `skills/` 下。
-- `--resources scripts,references,assets`
-  一次性把常见资源目录建出来。
+### 4. 先放资源，再写 `SKILL.md`
 
-如果只是一个很轻量的 skill，也可以只建需要的目录，不必把所有资源都生成出来。
+比较稳妥的顺序是：
 
-### 4. 优先写资源，再写 `SKILL.md`
+1. 把脚本、参考资料、模板放到位
+2. 再写 `SKILL.md`
 
-一个常见误区是先把 `SKILL.md` 写得很长，结果后面真正的脚本、模板、参考资料又散落在别处。更稳妥的做法是：
+这样做的好处：
 
-1. 先把要复用的脚本、参考资料、模板放到位。
-2. 再写 `SKILL.md`，让它成为“导航和执行说明”。
+- `SKILL.md` 更容易保持精简
+- 路由写法会更贴近真实资源
+- 后续维护时更容易判断是该改 router 还是该改实现
 
-这样做的好处是：
+### 5. 把 `SKILL.md` 写成入口，而不是总文档
 
-- `SKILL.md` 不会臃肿。
-- 资源边界更清楚。
-- 后续维护时更容易判断该改指令还是改脚本。
-
-### 5. 写好 `SKILL.md`
-
-`SKILL.md` 是 skill 的核心入口，建议重点写好这几部分：
-
-- YAML frontmatter
-  只放 `name` 和 `description`。
-- 简短的总说明
-  说明这个 skill 的目标和使用方式。
-- 任务路由
-  告诉 agent 在什么场景该看哪份 `references/` 或跑哪个 `scripts/`。
-- 默认工作流
-  给出一个最小、稳定、可重复的执行顺序。
-- 资源说明
-  说明各目录下文件的角色。
-
-这里最重要的是 `description`。
-
-因为对 agent 来说，它不只是介绍文字，还是 skill 的主要触发条件之一。所以描述里要明确写出：
-
-- skill 做什么。
-- 什么时候应该用它。
-- 哪些用户请求会触发它。
-
-### 6. 补 `agents/openai.yaml`
-
-如果这个 skill 需要更好的 UI 展示，建议补上 `agents/openai.yaml`。
-
-最常用的字段有：
-
-- `display_name`
-- `short_description`
-- `default_prompt`
-
-这个仓库里的 [`skills/yuque-openapi/agents/openai.yaml`](../skills/yuque-openapi/agents/openai.yaml) 就是一个参考：
-
-- `display_name` 给出人类可读名称。
-- `short_description` 用一句话说明核心能力。
-- `default_prompt` 会直接引导用户如何调用 skill，而且要显式提到 `$skill-name`。
-
-## 一个最小可复制模板
-
-如果你想先快速起一个可用骨架，再慢慢补细节，可以直接复制下面这两段。
-
-### `SKILL.md` 最小模板
+推荐结构：
 
 ```markdown
 ---
 name: my-skill
-description: Briefly describe what this skill does and when Codex should use it. Mention the task type, files, tools, or user requests that should trigger it.
+description: Describe what the skill does and when Codex should use it. Use when the task matches this workflow.
 ---
 
 # My Skill
 
-Use this skill to handle the target workflow in a repeatable way.
+Use this skill for the target workflow.
 
 ## Safety First
 
-- State any important safety or confirmation rules here.
-- Mention any secrets, destructive actions, or irreversible changes that need extra care.
+- List any irreversible, destructive, or secret-related constraints.
 
 ## Task Router
 
 - For the main workflow:
-  Read `references/main-workflow.md` if it exists.
+  Read `references/main.md`.
 - For deterministic execution:
-  Run `scripts/my_tool.py` if it exists.
+  Run `scripts/my_tool.py`.
+
+## Progressive Loading
+
+- Stay in this file for routing, safety, and command selection.
+- Read only the one `references/*.md` file that matches the task.
+- Load only `scripts/my_tool.py` when execution, debugging, or patching is required.
+- Do not preload every reference file.
 
 ## Default Workflow
 
-1. Check the target input, environment, or files.
+1. Inspect the target context.
 2. Choose the smallest safe action.
-3. Run the main workflow.
-4. Validate the result before finishing.
-
-## Bundled Resources
-
-- `scripts/`: executable helpers for repeated or fragile tasks.
-- `references/`: detailed materials that should be loaded only when needed.
-- `assets/`: templates or output resources.
+3. Execute the workflow.
+4. Validate the result.
 ```
 
-### `agents/openai.yaml` 最小模板
+这一步最重要的不是文风，而是边界：
+
+- 把核心流程留在 `SKILL.md`
+- 把细节拆去 `references/`
+- 把实现沉到 `scripts/`
+
+### 6. 补 `agents/openai.yaml`
+
+最小版本通常就够了：
 
 ```yaml
 interface:
   display_name: "My Skill"
   short_description: "Short human-facing summary of the skill."
-  default_prompt: "Use $my-skill to handle the target workflow in a safe, repeatable way."
+  default_prompt: "Use $my-skill to handle the target workflow."
 ```
 
-### 使用这个模板时，至少替换这些占位内容
+要求：
 
-- 把 `my-skill` 换成真实 skill 名，保持和目录名一致。
-- 把 `description` 改成“做什么 + 什么时候用”的明确描述，不要留成泛话。
-- 把标题、默认工作流和资源说明改成真实任务。
-- 如果没有 `references/` 或 `scripts/`，就把对应说明删掉，不要保留空导航。
-- 把 `default_prompt` 改成真实调用语句，并显式包含 `$skill-name`。
+- 文案和 `SKILL.md` 一致
+- `default_prompt` 显式提到 `$my-skill`
 
-### 7. 验证 skill 结构
+### 7. 给 skill 留下可回归入口
 
-完成初稿后，建议至少做两类检查：
+如果 skill 复杂到已经带脚本，建议同步补一个统一检查入口。
 
-1. 结构校验
-2. 真实运行验证
+建议至少覆盖：
 
-结构校验示例：
+- `quick_validate.py` 结构校验
+- 渐进式结构校验，包括长 reference 的顶部目录导航和 reference 可达性
+- 一条真实可跑的 smoke / selftest
+
+本仓库当前推荐命令：
 
 ```text
 python <CODEX_HOME>/skills/.system/skill-creator/scripts/quick_validate.py skills/my-skill
+python scripts/check_progressive_skills.py
 ```
 
-这个步骤主要用来发现：
+如果 skill 带业务脚本，再补类似下面的入口：
 
-- frontmatter 缺字段
-- skill 命名不符合规则
-- 基本目录结构有问题
+```text
+python skills/my-skill/scripts/check_my_skill.py
+```
 
-### 8. 运行并测试脚本
+推荐把 `check_my_skill.py` 的命令行接口统一成：
 
-如果 skill 带了 `scripts/`，不要只写完不跑。至少要做一轮代表性验证，确认：
+- `--validator`
+- `--skip-selftest`
+- `--skip-validate`
+- `--skip-help-smoke`
 
-- 能正常执行
-- 参数设计合理
-- 报错信息可读
-- 输出结构稳定
+这样 GitHub Actions、人工排查和后续新增 skill 都能复用同一套调用方式。
 
-这个仓库里的 [`skills/yuque-openapi/scripts/check_yuque_skill.py`](../skills/yuque-openapi/scripts/check_yuque_skill.py) 就是一个很好的实践：它把自测、帮助命令 smoke test 和结构校验串成了一套统一入口。
+### 8. 同步仓库级文档
 
-### 9. 用真实任务迭代
+只改 skill 目录还不够。新增或重构 skill 时，建议同步更新：
 
-skill 第一次写完通常只是“能用”，还不是“好用”。更实际的做法是：
+- 仓库根目录 [README.md](../README.md)
+- 对应的业务文档或入口文档
+- 如有需要，`docs/README.md`
 
-1. 先在真实任务里用起来。
-2. 观察 agent 卡在哪些地方。
-3. 决定该补脚本、补参考文档，还是改 `SKILL.md` 的路由方式。
+## 常见反模式
 
-最值得优先优化的，通常是这些问题：
+以下写法通常会让 skill 变得难维护：
 
-- 经常走错参考文件。
-- 关键保护规则没有写清楚。
-- 重复写同一段脚本。
-- 输出格式不稳定，难以接自动化。
+- 把大量背景介绍直接堆进 `SKILL.md`
+- `Task Router` 同时指向很多 reference，但没有说明触发条件
+- 让 reference 再去导航下一层 reference
+- 有脚本却没有任何 smoke check
+- `description` 只写“这是一个有用的 skill”，没有写触发条件
 
-## 制作 skill 的一个简化清单
+## 迭代建议
 
-在本仓库里新增 skill 时，可以按下面的清单走：
+skill 第一次做完通常只是“能用”，不是“好用”。后续优化优先级建议是：
 
-1. 明确 skill 名称、能力边界和触发场景。
-2. 决定是否需要 `scripts/`、`references/`、`assets/`。
-3. 初始化 skill 目录。
-4. 先放资源文件，再写 `SKILL.md`。
-5. 补 `agents/openai.yaml`。
-6. 跑结构校验。
-7. 跑脚本测试或最小可行验证。
-8. 在真实任务里迭代。
+1. 先修正触发和路由是否准确
+2. 再把重复逻辑沉到脚本
+3. 再把长说明拆去 `references/`
+4. 最后补检查和仓库级文档
 
-## 和本仓库配套的实践建议
+## 提交前快速自查
 
-结合当前仓库现状，比较推荐的做法是：
-
-- 把“给人看的仓库级教程”放在 `docs/`，不要塞进 skill 文件夹内部。
-- 把“给 agent 执行的具体说明”放在 `SKILL.md` 和 `references/`。
-- 把“重复执行、需要稳定性”的逻辑放到 `scripts/`。
-- 把“只在输出时使用”的模板或资源放到 `assets/`。
-- 尽量让每个 skill 都有至少一个可运行的检查入口，降低后续回归成本。
+- `description` 是否包含清晰触发语句？
+- `SKILL.md` 是否还保持在渐进式入口的范围内？
+- `Task Router` 是否能把人送到最窄入口？
+- `Progressive Loading` 是否写清楚按需加载规则？
+- 所有脚本是否真实跑过？
+- 仓库级文档是否同步？

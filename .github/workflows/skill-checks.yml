@@ -27,5 +27,8 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Validate progressive skill structure
+        run: python scripts/check_progressive_skills.py
+
       - name: Run ${{ matrix.name }} checks
         run: ${{ matrix.command }}

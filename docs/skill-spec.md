@@ -1,12 +1,12 @@
 # Skills 规范说明
 
-这篇文档总结的是“在本仓库里维护 skill 时，建议遵守的结构和编写规范”。它主要基于当前仓库实践，以及 `skill-creator` 的规则整理而成。
+这篇文档定义的是“本仓库里的 skill 应该长成什么样”。它不是业务说明，而是结构和写法约束。
 
-如果你想看从 0 到 1 的制作步骤，请先读 [skill-authoring.md](./skill-authoring.md)。
+如果你想快速做出一个最小 skill，先看 [skill-quickstart.md](./skill-quickstart.md)；如果你想看从 0 到 1 的完整制作流程，再看 [skill-authoring.md](./skill-authoring.md)。
 
-## 1. 目录结构规范
+## 1. 目录结构
 
-一个 skill 文件夹建议长成这样：
+一个 skill 目录建议按下面的方式组织：
 
 ```text
 skills/<skill-name>/
@@ -18,26 +18,23 @@ skills/<skill-name>/
 `- assets/
 ```
 
-其中：
+约束如下：
 
 - `SKILL.md` 必须存在。
 - `agents/openai.yaml` 推荐存在。
-- `scripts/`、`references/`、`assets/` 按需要创建，不需要时不要硬加。
+- `scripts/`、`references/`、`assets/` 按需创建，不要为了“看起来完整”放空目录。
 
 ## 2. 命名规范
 
-skill 名称建议遵守这些规则：
+- 目录名只用小写字母、数字和连字符。
+- 目录名和 frontmatter 里的 `name` 保持一致。
+- 名称尽量短、清晰、可触发，优先描述动作或能力，而不是宽泛名词。
 
-- 只用小写字母、数字和连字符。
-- 目录名和 skill 名保持一致。
-- 尽量短、小而准。
-- 名称要能反映动作或能力，而不是宽泛名词。
-
-例如：
+推荐：
 
 - `yuque-openapi`
+- `feishu-doc-sync`
 - `gh-fix-ci`
-- `skill-creator`
 
 不推荐：
 
@@ -45,159 +42,157 @@ skill 名称建议遵守这些规则：
 - `tools_for_docs`
 - `all-in-one-helper`
 
-## 3. `SKILL.md` frontmatter 规范
+## 3. Frontmatter 规范
 
-`SKILL.md` 顶部必须带 YAML frontmatter，而且只保留这两个字段：
+`SKILL.md` 顶部必须包含 YAML frontmatter，并且只保留两个字段：
 
 ```yaml
 ---
 name: my-skill
-description: Clear description of what the skill does and when to use it.
+description: Describe what the skill does and when Codex should use it. Use when ...
 ---
 ```
 
-规范要点：
+要求：
 
-- `name`
-  必须等于 skill 名。
-- `description`
-  要同时写“做什么”和“什么时候用”。
-- 不要在 frontmatter 里随意加别的字段。
+- `name` 必须等于目录名。
+- `description` 必须同时写清“做什么”和“什么时候用”。
+- `description` 里建议显式出现 `Use when ...` 触发短语，方便路由和校验。
+- 不要在 frontmatter 里继续堆自定义字段。
 
-## 4. `description` 的编写规范
+## 4. 渐进式 skill 约束
 
-`description` 是 skill 最关键的触发信息之一，所以建议写得尽量明确。
+本仓库默认把 skill 设计成“渐进式加载”能力包。
 
-应该包含：
+加载顺序应当是：
 
-- skill 提供什么能力。
-- 适用于什么文件、场景、工具或任务。
-- 用户可能会怎么描述这个需求。
+1. frontmatter 决定是否触发。
+2. `SKILL.md` 提供最小执行导航。
+3. `references/`、`scripts/`、`assets/` 只在当前任务需要时再进入。
 
-不建议只写很泛的句子，比如：
+这不是建议语气，而是推荐落成明确结构：
 
-- “A helpful skill.”
-- “Use for many tasks.”
-- “Document related helper.”
-
-更好的写法是：
-
-- “Cross-platform workflow for syncing local Markdown files or whole Markdown directories with Yuque knowledge bases...”
-
-也就是像当前 [`skills/yuque-openapi/SKILL.md`](../skills/yuque-openapi/SKILL.md) 这样，把功能和触发场景一起写进描述里。
+- `SKILL.md` 默认控制在 500 行以内。
+- `SKILL.md` 至少包含 `## Task Router`、`## Progressive Loading`、`## Default Workflow`。
+- `## Progressive Loading` 必须明确说明：
+  - 只按需读取匹配主题的 `references/*.md`
+  - 只在执行、调试或补丁时打开 `scripts/`
+  - 不要预加载所有参考资料
+- 如果 skill 下存在非空 `references/`，就在 `## Task Router` 和 `## Reference Files` 里显式暴露入口。
+- 如果 skill 下存在 `scripts/`、`references/` 或 `assets/`，就在 `## Bundled Resources` 里说明它们的角色。
+- reference 导航尽量保持从 `SKILL.md` 一跳可达，不要设计成层层继续找下一份 reference。
+- 单个 `references/*.md` 超过 100 行时，必须把 `## Contents` 放成第一个二级标题，并覆盖后续所有二级章节，方便按需跳转到最窄段落。
+- 每个 `references/*.md` 都必须能从 `SKILL.md` 直达，或通过一个已在 `SKILL.md` 暴露的 reference 路由页在两跳内到达；不要把 reference 链接继续嵌套成三跳以上。
 
 ## 5. `SKILL.md` 正文规范
 
-正文建议只保留真正必要的执行说明，不要写成泛化 README。
+`SKILL.md` 不是 README，它的目标是让 agent 快速、安全地进入正确路径。
 
-推荐保留：
+推荐保留这些部分：
 
-- 简短目标说明
-- 安全约束
-- 任务路由
-- 默认工作流
-- 资源说明
+- 一句目标说明
+- `## Safety First`
+- `## Task Router`
+- `## Progressive Loading`
+- `## Default Workflow`
+- `## Reference Files`
+- `## Bundled Resources`
 
-不推荐塞进 `SKILL.md` 的内容：
+其中：
 
-- 过长的背景介绍
-- 大段安装说明
-- 大量和执行无关的设计讨论
-- 面向人类读者的冗余教程
+- 核心路由和默认动作留在 `SKILL.md`
+- 细节规则、接口说明和专题策略拆到 `references/`
+- 可重复执行的实现放进 `scripts/`
 
-一句话原则：
+## 6. Task Router 写法
 
-- 核心流程写进 `SKILL.md`
-- 详细材料拆进 `references/`
+`## Task Router` 的目标不是“把所有能力都写一遍”，而是把当前任务送到最窄的入口。
 
-## 6. 正文措辞规范
+推荐写法：
 
-建议使用偏命令式、执行式的写法，例如：
+- 用场景来分，而不是按文件名硬堆列表。
+- 每一条 router 都说明“什么时候看哪个 reference / 什么时候跑哪个 script”。
+- 一条 router 优先只指向一个主入口。
 
-- “Use the bundled Python CLI...”
-- “Read `references/dir-sync.md`.”
-- “Run `validate-manifest` before execution.”
+示例：
 
-尽量避免：
+```markdown
+## Task Router
 
-- 过多铺垫性叙述
-- 长篇背景理论
-- 大段“为什么我这样设计”的创作说明
+- Sync one markdown file:
+  Use `push-markdown` or `pull-markdown`, then read `references/file-sync.md`.
+- Plan a directory run:
+  Use `plan-dir`, then read `references/dir-sync.md`.
+```
 
-因为 skill 是给 agent 执行时用的，最重要的是“可行动性”和“可路由性”。
+## 7. Progressive Loading 写法
 
-## 7. Progressive Disclosure 规范
+`## Progressive Loading` 要写成可以直接执行的约束，而不是抽象原则。
 
-skill 应尽量遵守“渐进披露”原则，也就是：
+推荐包含：
 
-1. 先靠 frontmatter 触发
-2. 再加载 `SKILL.md`
-3. 需要时再读 `references/` 或执行 `scripts/`
+- 留在当前文件的内容范围
+- 什么时候才去读 `references/`
+- 什么时候才去读或执行 `scripts/`
+- 不要一次性预读所有资料
 
-这意味着：
+示例：
 
-- `SKILL.md` 要尽量精简。
-- 大块说明、接口文档、策略细节应拆去 `references/`。
-- 不要把所有内容都堆在一个文件里。
+```markdown
+## Progressive Loading
 
-一个比较好的模式就是当前 `yuque-openapi`：
-
-- `SKILL.md` 只做任务路由和总流程说明。
-- 各专题细节分散在 `references/dir-sync.md`、`references/toc-sync.md`、`references/manifest.md` 等文件中。
+- Stay in this file for routing, safety, and command selection.
+- Read only the single `references/*.md` file that matches the current task.
+- Load only `scripts/foo.py` when you need to execute, debug, or patch the implementation.
+- Do not preload every reference file just because the skill triggered.
+```
 
 ## 8. `scripts/` 规范
 
-什么时候应该放脚本：
+适合放进 `scripts/` 的内容：
 
-- 同一段逻辑会反复重写。
-- 这个操作容易出错，需要更高确定性。
-- 需要对外暴露稳定参数和稳定输出。
+- 会被反复执行的逻辑
+- 容易出错、需要稳定参数和输出的逻辑
+- 希望通过本地或 CI 检查重复回归的逻辑
 
-脚本编写建议：
+脚本要求：
 
-- 尽量让输入输出清晰。
-- 报错信息要能帮助定位问题。
-- 对关键路径提供最小验证。
-- 新增脚本后最好实际跑一遍，而不是只写不测。
+- 输入输出清晰
+- 报错能定位问题
+- 至少有一条代表性的验证路径
 
 ## 9. `references/` 规范
 
-适合放进 `references/` 的内容包括：
+适合放进 `references/` 的内容：
 
-- 详细接口说明
-- 领域知识
-- 公司规则
+- 接口说明
+- 规则说明
 - 专题工作流
-- 疑难排查说明
+- 故障排查
+- 领域知识
 
 推荐做法：
 
-- 按主题拆文件。
-- 大文件前面加目录。
-- 在 `SKILL.md` 里明确写出“什么时候该读哪一份 reference”。
-
-不推荐做法：
-
-- 把所有参考资料堆进一个超长文件。
-- 让 reference 再层层跳转，过度嵌套。
+- 按主题拆文件
+- 在 `SKILL.md` 里明确写出什么场景看哪一份
+- 超过 100 行的 reference 文件，把 `## Contents` 放在顶部，并为后续每个 `##` 章节提供锚点链接
+- 如果某个 reference 只是“索引页”，就在 `SKILL.md` 里直接暴露它，并确保它指向的 reference 仍然保持两跳内可达
+- 不要让 reference 再变成新的总目录说明书
 
 ## 10. `assets/` 规范
 
-`assets/` 放的是“输出时要用的资源”，而不是“给模型读的长文档”。
+`assets/` 放的是输出资源，不是上下文说明。
 
 适合放：
 
 - 模板
-- 图标
-- 示例清单
 - 样例输入输出
-- 前端骨架
-
-例如本仓库里的 [`skills/yuque-openapi/assets/manifests/`](../skills/yuque-openapi/assets/manifests/) 就是典型用途：放可复用的批量任务模板。
+- 图标
+- 可复用资源文件
 
 ## 11. `agents/openai.yaml` 规范
 
-推荐保留一个最小但可用的 `agents/openai.yaml`：
+推荐保留一个最小可用版本：
 
 ```yaml
 interface:
@@ -206,24 +201,20 @@ interface:
   default_prompt: "Use $my-skill to do ..."
 ```
 
-几个关键约束：
+要求：
 
-- 字符串值统一加引号。
-- `default_prompt` 要显式提到 `$skill-name`。
-- 只在确实需要时再补图标、品牌色、依赖等扩展字段。
+- 字符串统一加引号
+- `default_prompt` 显式包含 `$skill-name`
+- UI 文案和 `SKILL.md` 的能力边界保持一致
 
-当前 [`skills/yuque-openapi/agents/openai.yaml`](../skills/yuque-openapi/agents/openai.yaml) 可以作为一个简单参考。
-
-## 12. 符合规范的最小模板
-
-如果你只是想先写一个“结构合法、能继续迭代”的最小版本，可以直接从下面开始。
+## 12. 最小模板
 
 ### 最小 `SKILL.md`
 
 ```markdown
 ---
 name: my-skill
-description: Describe what the skill does and when Codex should use it. Include the task, context, file type, tool, or user request patterns that should trigger it.
+description: Describe what the skill does and when Codex should use it. Use when the task matches this workflow.
 ---
 
 # My Skill
@@ -234,6 +225,13 @@ Use this skill for the target workflow.
 
 - For the main workflow:
   Read `references/main.md` if needed.
+
+## Progressive Loading
+
+- Stay in this file for routing and safety.
+- Read only the one `references/*.md` file that matches the task.
+- Load only `scripts/my_tool.py` when execution or debugging is required.
+- Do not preload every reference file.
 
 ## Default Workflow
 
@@ -252,73 +250,29 @@ interface:
   default_prompt: "Use $my-skill to handle the target workflow."
 ```
 
-### 这个最小模板要满足的规范
+## 13. 验证规范
 
-- `name` 必须是小写连字符形式。
-- `description` 不能只写空泛介绍，必须写触发场景。
-- `default_prompt` 必须显式提到 `$my-skill` 这种 skill 调用形式。
-- YAML 字符串值要加引号，键名不要加引号。
-- 如果没有 `references/`、`scripts/`、`assets/`，不要在 skill 目录里硬放空文件。
-
-## 13. 不要往 skill 目录里放什么
-
-skill 目录内不建议放仓库式杂项文件，例如：
-
-- `README.md`
-- `CHANGELOG.md`
-- `INSTALLATION_GUIDE.md`
-- `QUICK_REFERENCE.md`
-
-原因不是这些文件没价值，而是：
-
-- 对 agent 执行帮助不大
-- 会增加上下文噪音
-- 会让 skill 目录边界变得模糊
-
-如果你确实想写“给人看的说明”，更适合放在本仓库的 `docs/` 下，就像这篇文档这样。
-
-## 14. 验证规范
-
-新增或修改 skill 后，至少建议做两类验证：
+新增或修改 skill 后，至少建议做两层验证：
 
 1. 结构校验
 2. 代表性运行验证
 
-结构校验可以用 `skill-creator` 提供的校验脚本。
+本仓库当前推荐：
 
-如果 skill 内有脚本，建议至少验证：
+- 结构校验：`python <CODEX_HOME>/skills/.system/skill-creator/scripts/quick_validate.py skills/<skill-name>`
+- 渐进式结构校验：`python scripts/check_progressive_skills.py`，同时检查长 reference 的 `## Contents` 导航是否完整，以及每个 reference 是否能从 `SKILL.md` 在两跳内到达
+- 业务 smoke / selftest：为复杂 skill 提供自己的 `check_*.py`
 
-- 脚本能运行
-- 关键参数没问题
-- 输出格式稳定
-- 报错信息可读
+## 14. 提交前检查清单
 
-如果 skill 足够复杂，最好像当前 `yuque-openapi` 一样，再提供一个统一检查入口。
-
-## 15. 本仓库内的推荐提交规范
-
-在这个仓库里维护 skill 时，比较推荐：
-
-- skill 功能改动和文档改动尽量一起提交。
-- 新增脚本时同时补最小验证。
-- 新增 `references/` 时同时更新 `SKILL.md` 路由。
-- 新增 skill 时同时更新根目录 `README.md` 和 `docs/README.md`。
-
-这样做的好处是：
-
-- 仓库首页始终能反映真实能力。
-- `docs/` 不会和 `skills/` 脱节。
-- 后续维护者更容易理解每个 skill 的边界。
-
-## 16. 一个可直接套用的检查清单
-
-在提交前，可以快速自查：
-
-- skill 名是否符合小写连字符规则？
-- `SKILL.md` 是否包含且仅包含 `name`、`description` 两个 frontmatter 字段？
-- `description` 是否写清“做什么”和“什么时候用”？
-- `SKILL.md` 是否足够精简，没有把细节全堆进去？
-- `references/` 是否按主题拆分？
-- `scripts/` 是否真的跑过？
-- `agents/openai.yaml` 是否和 skill 内容匹配？
-- 仓库级文档是否同步更新？
+- skill 名称是否符合小写连字符规则？
+- `SKILL.md` frontmatter 是否只包含 `name` 和 `description`？
+- `description` 是否写清“做什么”和“Use when ...”？
+- `SKILL.md` 是否已经写成渐进式入口？
+- `SKILL.md` 是否包含 `Task Router`、`Progressive Loading`、`Default Workflow`？
+- 如果存在 `references/`，是否在 router 和 reference section 中暴露入口？
+- 如果存在长 reference，是否已经补了顶部 `## Contents`，并覆盖后续所有二级章节？
+- 如果存在多个 reference，它们是否都能从 `SKILL.md` 在两跳内到达，没有孤儿 reference？
+- 如果存在 `scripts/`，是否真的跑过？
+- `agents/openai.yaml` 是否和 skill 能力匹配？
+- 仓库级 README 和对应 docs 是否已经同步？

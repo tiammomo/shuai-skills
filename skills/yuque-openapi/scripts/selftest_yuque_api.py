@@ -23,6 +23,7 @@ class FakeYuqueClient:
         self.toc_items = list(toc_items or [])
         self.next_id = 1
         self.repo_put_payloads: List[Dict[str, Any]] = []
+        self.doc_detail_refs: List[str] = []
         for doc in docs or []:
             self._seed_doc(doc)
 
@@ -97,6 +98,7 @@ class FakeYuqueClient:
             if doc is None:
                 raise yuque_api.YuqueApiError("Not found", status=404, method=method, path=path)
             if method == "GET":
+                self.doc_detail_refs.append(str(ref))
                 return {"data": dict(doc)}
             if method == "PUT":
                 updated = dict(doc)
@@ -207,6 +209,99 @@ def test_plan_dir_markdown_includes_review_diff_preview() -> None:
         assert_true("--- local:guide.md" in preview_text, "Expected the diff preview to include the local file header.")
         assert_true("+++ yuque:guide" in preview_text, "Expected the diff preview to include the remote doc header.")
         assert_true("Local paragraph." in preview_text and "Remote paragraph." in preview_text, "Expected the diff preview to include the changed local and remote lines.")
+
+
+def test_plan_dir_markdown_writes_review_report() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "docs"
+        root.mkdir()
+        review_path = root / "review.md"
+        (root / "guide.md").write_text(
+            "---\n"
+            "yuque_doc_id: 11\n"
+            "yuque_doc_slug: guide\n"
+            "title: Guide\n"
+            "---\n"
+            "\n"
+            "# Guide\n\nLocal paragraph.\n",
+            encoding="utf-8",
+        )
+        args = yuque_api.namespace_from_operation(
+            {
+                "command": "plan-dir-markdown",
+                "repo": "demo/repo",
+                "root_dir": str(root),
+                "include_diff": True,
+                "write_review": str(review_path),
+            }
+        )
+        result = yuque_api.perform_command(
+            FakeYuqueClient(
+                docs=[
+                    {
+                        "id": 11,
+                        "slug": "guide",
+                        "title": "Guide",
+                        "body": "# Guide\n\nRemote paragraph.\n",
+                        "updated_at": "2026-03-14T00:08:00Z",
+                    }
+                ]
+            ),
+            args,
+        )
+        assert_true(result["meta"].get("review_path") == str(review_path), "Expected the plan metadata to report the written review path.")
+        report_text = review_path.read_text(encoding="utf-8")
+        assert_true("# Yuque Directory Sync Review" in report_text, "Expected the review report heading to be written.")
+        assert_true("## Conflict Items" in report_text, "Expected the review report to group conflict plan items.")
+        assert_true("manual_review" in report_text, "Expected the review report to include the recommended review action.")
+        assert_true("+++ yuque:guide" in report_text, "Expected the review report to include the diff preview.")
+
+
+def test_plan_dir_markdown_fetches_remote_detail_on_demand() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "docs"
+        root.mkdir()
+        (root / "guide.md").write_text(
+            "---\n"
+            "yuque_doc_id: 11\n"
+            "yuque_doc_slug: guide\n"
+            "title: Guide\n"
+            "---\n"
+            "\n"
+            "# Guide\n\nLocal paragraph.\n",
+            encoding="utf-8",
+        )
+        client = FakeYuqueClient(
+            docs=[
+                {
+                    "id": 11,
+                    "slug": "guide",
+                    "title": "Guide",
+                    "body": "# Guide\n\nRemote paragraph.\n",
+                    "updated_at": "2026-03-14T00:08:00Z",
+                },
+                {
+                    "id": 22,
+                    "slug": "remote-only",
+                    "title": "Remote Only",
+                    "body": "# Remote Only\n\nPull me later.\n",
+                    "updated_at": "2026-03-14T00:09:00Z",
+                },
+            ]
+        )
+        args = yuque_api.namespace_from_operation(
+            {
+                "command": "plan-dir-markdown",
+                "repo": "demo/repo",
+                "root_dir": str(root),
+            }
+        )
+        result = yuque_api.perform_command(client, args)
+        remote_fetch_meta = result["meta"].get("remote_fetch", {})
+        assert_true(remote_fetch_meta.get("summary_count") == 2, "Expected two remote doc summaries in the planning metadata.")
+        assert_true(remote_fetch_meta.get("detail_fetch_count") == 1, "Expected the planner to fetch remote detail only for the matched doc.")
+        assert_true(remote_fetch_meta.get("detail_fetch_saved_count") == 1, "Expected one remote-only doc to skip the detail fetch.")
+        assert_true(client.doc_detail_refs == ["11"], "Expected only the matched remote doc to require a detail request during planning.")
 
 
 def test_push_dir_markdown_sync_toc_creates_backup() -> None:
@@ -434,6 +529,8 @@ def main() -> int:
     tests = [
         ("plan-dir-markdown", test_plan_dir_markdown_writes_manifest),
         ("plan-dir-markdown --include-diff", test_plan_dir_markdown_includes_review_diff_preview),
+        ("plan-dir-markdown --write-review", test_plan_dir_markdown_writes_review_report),
+        ("plan-dir-markdown lazy remote detail", test_plan_dir_markdown_fetches_remote_detail_on_demand),
         ("push-dir-markdown --sync-toc", test_push_dir_markdown_sync_toc_creates_backup),
         ("validate-manifest", test_validate_manifest_rejects_missing_required_fields),
         ("run-manifest", test_run_manifest_continue_on_error),

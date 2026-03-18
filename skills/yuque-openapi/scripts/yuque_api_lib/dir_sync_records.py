@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .client import YuqueClient, build_path, build_repo_path, fetch_all_pages, fetch_doc_detail, fetch_repo_toc, unwrap_data
+from .client import YuqueClient, fetch_doc_detail, fetch_repo_doc_summaries, fetch_repo_toc
 from .core import DEFAULT_LIMIT, YuqueApiError
 from .dir_sync_types import IndexEntry, LocalMarkdownRecord, RecordLike, RecordMaps, RemoteMarkdownRecord
 from .dir_sync_utils import build_toc_path_map, choose_remote_relative_path, find_record
@@ -54,16 +54,7 @@ def fetch_remote_markdown_records(
     name_by: str,
     flat: bool,
 ) -> List[RemoteMarkdownRecord]:
-    docs_response = fetch_all_pages(
-        lambda offset, limit: client.request(
-            "GET",
-            build_repo_path(repo_ref) + build_path("docs"),
-            query={"offset": offset, "limit": limit},
-        ),
-        offset=0,
-        limit=DEFAULT_LIMIT,
-    )
-    docs = unwrap_data(docs_response)
+    docs = fetch_repo_doc_summaries(client, repo_ref)
     if not isinstance(docs, list):
         raise YuqueApiError("Expected doc list while building directory sync state.")
 
@@ -76,20 +67,18 @@ def fetch_remote_markdown_records(
         doc_id = str(item.get("id") or "")
         if not doc_id:
             continue
-        doc = fetch_doc_detail(client, repo_ref, doc_id)
-        body = doc_markdown_body(doc)
         records.append(
             {
                 "doc_id": doc_id,
-                "doc_slug": str(doc.get("slug") or ""),
-                "title": str(doc.get("title") or ""),
-                "public": doc.get("public"),
-                "format": doc.get("format"),
-                "updated_at": doc.get("updated_at"),
-                "body": body,
-                "content_hash": hash_markdown_content(body),
+                "doc_slug": str(item.get("slug") or ""),
+                "title": str(item.get("title") or ""),
+                "public": item.get("public"),
+                "format": item.get("format"),
+                "updated_at": item.get("updated_at"),
+                "body": "",
+                "content_hash": None,
                 "relative_path": choose_remote_relative_path(
-                    doc,
+                    item,
                     index_maps=index_maps,
                     local_maps=local_maps,
                     toc_path_map=toc_path_map,
@@ -99,6 +88,30 @@ def fetch_remote_markdown_records(
         )
     records.sort(key=lambda record: (record.get("relative_path") or "", record.get("doc_id") or ""))
     return records
+
+
+def ensure_remote_markdown_record_detail(
+    client: YuqueClient,
+    repo_ref: str,
+    remote_record: RemoteMarkdownRecord,
+) -> Tuple[RemoteMarkdownRecord, bool]:
+    if remote_record.get("content_hash") not in (None, "") and remote_record.get("body") is not None:
+        return remote_record, False
+
+    doc_id = str(remote_record.get("doc_id") or "")
+    if not doc_id:
+        raise YuqueApiError("Remote directory sync record is missing doc_id, so detail hydration cannot continue.")
+
+    doc = fetch_doc_detail(client, repo_ref, doc_id)
+    body = doc_markdown_body(doc)
+    remote_record["doc_slug"] = str(doc.get("slug") or remote_record.get("doc_slug") or "")
+    remote_record["title"] = str(doc.get("title") or remote_record.get("title") or "")
+    remote_record["public"] = doc.get("public", remote_record.get("public"))
+    remote_record["format"] = doc.get("format", remote_record.get("format"))
+    remote_record["updated_at"] = doc.get("updated_at", remote_record.get("updated_at"))
+    remote_record["body"] = body
+    remote_record["content_hash"] = hash_markdown_content(body)
+    return remote_record, True
 
 
 def find_base_entry(

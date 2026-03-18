@@ -27,6 +27,94 @@ class DirectionalSyncOutput(TypedDict):
     blocked: List[Dict[str, Any]]
 
 
+def render_plan_review_report(plan: Dict[str, Any]) -> str:
+    meta = plan.get("meta", {}) if isinstance(plan, dict) else {}
+    summary = meta.get("summary", {}) if isinstance(meta.get("summary"), dict) else {}
+    review_meta = meta.get("review", {}) if isinstance(meta.get("review"), dict) else {}
+    remote_fetch = meta.get("remote_fetch", {}) if isinstance(meta.get("remote_fetch"), dict) else {}
+    items = plan.get("data", []) if isinstance(plan.get("data"), list) else []
+
+    lines: List[str] = [
+        "# Yuque Directory Sync Review",
+        "",
+        f"- Repo: `{meta.get('repo') or ''}`",
+        f"- Root Dir: `{meta.get('root_dir') or ''}`",
+        f"- Index File: `{meta.get('index_file') or ''}`",
+        "",
+        "## Summary",
+        "",
+        f"- Push: {summary.get('push', 0)}",
+        f"- Pull: {summary.get('pull', 0)}",
+        f"- Conflict: {summary.get('conflict', 0)}",
+        f"- Skip: {summary.get('skip', 0)}",
+        "",
+        "## Review Signals",
+        "",
+        f"- Manual Review Count: {review_meta.get('manual_review_count', 0)}",
+        f"- Diff Preview Count: {review_meta.get('diff_generated_count', 0)}",
+        "",
+        "## Remote Fetch",
+        "",
+        f"- Remote Summary Count: {remote_fetch.get('summary_count', 0)}",
+        f"- Remote Detail Fetch Count: {remote_fetch.get('detail_fetch_count', 0)}",
+        f"- Remote Detail Fetch Saved Count: {remote_fetch.get('detail_fetch_saved_count', 0)}",
+        "",
+    ]
+
+    for status in ("push", "pull", "conflict", "skip"):
+        status_items = [item for item in items if str(item.get("status") or "") == status]
+        if not status_items:
+            continue
+        lines.extend([f"## {status.title()} Items", ""])
+        for item in status_items:
+            review = item.get("review", {}) if isinstance(item.get("review"), dict) else {}
+            operation = item.get("operation")
+            diff_preview = item.get("diff_preview", {}) if isinstance(item.get("diff_preview"), dict) else {}
+            title = str(item.get("title") or Path(str(item.get("relative_path") or "item")).stem)
+            lines.extend(
+                [
+                    f"### `{item.get('relative_path')}`",
+                    "",
+                    f"- Title: {title}",
+                    f"- Status: `{item.get('status')}`",
+                    f"- Reason: `{item.get('reason')}`",
+                    f"- Recommended Action: `{review.get('recommended_action') or 'review'}`",
+                    f"- Review Summary: {review.get('summary') or ''}",
+                ]
+            )
+            if item.get("doc_id") or item.get("doc_slug"):
+                lines.append(
+                    f"- Remote: doc_id=`{item.get('doc_id') or ''}` slug=`{item.get('doc_slug') or ''}`"
+                )
+            if item.get("remote_updated_at"):
+                lines.append(f"- Remote Updated At: `{item.get('remote_updated_at')}`")
+            lines.append("")
+            if isinstance(operation, dict):
+                lines.extend(
+                    [
+                        "Operation:",
+                        "```json",
+                        json.dumps(operation, ensure_ascii=False, indent=2, sort_keys=True),
+                        "```",
+                        "",
+                    ]
+                )
+            if diff_preview.get("preview"):
+                diff_format = str(diff_preview.get("format") or "diff")
+                lines.extend(
+                    [
+                        f"Diff Preview ({diff_format}):",
+                        "```diff",
+                        str(diff_preview.get("preview") or ""),
+                        "```",
+                        "",
+                    ]
+                )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _execute_directional_sync(
     client: YuqueClient,
     *,
@@ -110,6 +198,11 @@ def handle_plan_dir_markdown(client: YuqueClient, args: argparse.Namespace) -> A
             encoding="utf-8",
         )
         plan["meta"]["manifest_path"] = str(manifest_path)
+    if args.write_review:
+        review_path = Path(args.write_review)
+        ensure_parent_dir(review_path)
+        review_path.write_text(render_plan_review_report(plan), encoding="utf-8")
+        plan["meta"]["review_path"] = str(review_path)
     return plan
 
 
@@ -260,6 +353,7 @@ def configure_plan_dir_markdown(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--slug-source", choices=("path", "stem"), default="path", help="How to derive slugs for brand-new docs without an existing mapping. Defaults to path.")
     parser.add_argument("--flat", action="store_true", help="Ignore Yuque TOC nesting and build flat fallback paths under the root directory.")
     parser.add_argument("--write-manifest", help="Optional path to write the generated sync manifest JSON.")
+    parser.add_argument("--write-review", help="Optional path to write a Markdown review report that summarizes plan items, review guidance, and diff previews.")
     parser.add_argument("--include-diff", action="store_true", help="Attach truncated unified diff previews for plan items whose local and remote markdown bodies both exist and differ.")
     parser.add_argument("--diff-max-lines", type=int, default=80, help="Maximum preview lines per diff when --include-diff is enabled. Defaults to 80.")
 
@@ -286,7 +380,7 @@ def configure_restore_repo_snapshot(parser: argparse.ArgumentParser) -> None:
 
 def build_sync_command_specs(dispatch_operation: OperationDispatcher) -> Tuple[CommandSpec, ...]:
     return (
-    CommandSpec("plan-dir-markdown", "Build a bidirectional incremental sync manifest for a repo and local markdown directory.", handle_plan_dir_markdown, configure_plan_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "slug_source": "path", "flat": False, "write_manifest": None, "include_diff": False, "diff_max_lines": 80}),
+    CommandSpec("plan-dir-markdown", "Build a bidirectional incremental sync manifest for a repo and local markdown directory.", handle_plan_dir_markdown, configure_plan_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "slug_source": "path", "flat": False, "write_manifest": None, "write_review": None, "include_diff": False, "diff_max_lines": 80}),
         CommandSpec("sync-dir-toc", "Rewrite a Yuque repo TOC from a local markdown directory tree.", handle_sync_dir_toc, configure_sync_dir_toc, {"index_file": DEFAULT_INDEX_FILE, "write_toc_file": None, "allow_prune": False, "backup_dir": None, "skip_backup": False}),
         CommandSpec("restore-repo-snapshot", "Restore docs and/or TOC from an automatic repo snapshot.", handle_restore_repo_snapshot, configure_restore_repo_snapshot, {"repo": None, "allow_repo_override": False, "skip_docs": False, "skip_toc": False, "dry_run": False, "write_toc_file": None}),
         CommandSpec("pull-dir-markdown", "Sync a Yuque repo into a local markdown directory, preserving known structure.", lambda client, args: handle_pull_dir_markdown(client, args, dispatch_operation=dispatch_operation), configure_pull_dir_markdown, {"index_file": DEFAULT_INDEX_FILE, "name_by": "title", "flat": False}),

@@ -14,6 +14,7 @@
 - Use `push-dir-markdown` when the local markdown tree is the source of truth for doc bodies.
 - Use `pull-dir-markdown` when the local directory should mirror a Yuque repo.
 - Use `plan-dir-markdown` before bulk syncs when both sides may have changed.
+- Use `plan-dir-markdown --write-review review.md` when the plan also needs a durable Markdown review artifact for async approval or audit.
 - Use `export-repo-markdown` instead of directory sync when the task is backup or migration without TOC reconstruction.
 
 ## Source Of Truth Rules
@@ -22,6 +23,8 @@
 - `pull-dir-markdown` executes only the `pull` operations from a generated sync plan.
 - `plan-dir-markdown` exposes `push`, `pull`, `skip`, and `conflict` items before anything is written.
 - `plan-dir-markdown --include-diff` also attaches `review` metadata for every plan item and truncated unified diff previews whenever both the local and remote markdown bodies exist and differ.
+- `plan-dir-markdown --write-review` persists the current plan plus its review metadata into a Markdown report that can be shared or archived outside the CLI JSON output.
+- `plan-dir-markdown` now fetches remote doc bodies on demand: it starts from repo doc summaries, then hydrates full remote markdown only for matched docs that actually need content comparison.
 - Existing doc identity comes from front matter first, then `yuque-index.json`.
 
 ## Command Patterns
@@ -30,7 +33,9 @@
 - `pull-dir-markdown <repo> <output-dir>` recreates the remote hierarchy locally and always writes front matter plus `yuque-index.json`.
 - `plan-dir-markdown <repo> <root-dir>` emits a reviewable manifest and can persist it with `--write-manifest`.
 - `plan-dir-markdown <repo> <root-dir> --include-diff --diff-max-lines 80` adds review summaries plus capped diff previews for manual conflict review or batch approval.
+- `plan-dir-markdown <repo> <root-dir> --include-diff --write-review review.md` writes a human-readable Markdown report that mirrors the plan summary, per-item review guidance, and available diff previews.
 - `push-dir-markdown --sync-toc` first performs the planned uploads, then rewrites the remote TOC from the local tree.
+- Larger repos benefit from the on-demand planner because unmatched remote-only docs can stay at summary level until a later pull actually needs their body.
 
 ## Path And Identity Rules
 
@@ -59,5 +64,8 @@
 - `push-dir-markdown` and `pull-dir-markdown` both refresh `<root>/yuque-index.json`.
 - Each index entry keeps `relative_path`, `doc_id`, `doc_slug`, `title`, `public`, `format`, `updated_at`, `content_hash`, and `last_sync_at`.
 - `plan-dir-markdown --write-manifest sync-plan.json` writes an object with an `operations` array ready for `run-manifest`.
+- `plan-dir-markdown --write-review review.md` writes a Markdown report that summarizes status counts, review recommendations, remote fetch costs, and any diff previews already attached to the plan.
 - `plan-dir-markdown` also reports `meta.review` counts so review-heavy runs can see how many items are ready to push, ready to pull, or still need manual attention.
+- `plan-dir-markdown` now also reports `meta.remote_fetch` counts so large plans can see how many remote docs stayed at summary level versus how many required a full body fetch.
+- When `--write-review` is used, the returned plan metadata also includes `meta.review_path`.
 - The plan preview paths follow the same default title-based hierarchy as `pull-dir-markdown`, so review output matches the eventual local tree.

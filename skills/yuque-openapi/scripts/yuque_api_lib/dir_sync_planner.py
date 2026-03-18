@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .client import YuqueClient
-from .dir_sync_records import fetch_remote_markdown_records, find_base_entry, load_local_markdown_records
+from .dir_sync_records import ensure_remote_markdown_record_detail, fetch_remote_markdown_records, find_base_entry, load_local_markdown_records
 from .dir_sync_store import build_record_maps, index_entries_from_document, load_index_document
 from .dir_sync_types import DirSyncPlan, DirSyncState, IndexEntry, LocalMarkdownRecord, RemoteMarkdownRecord, SyncPlanItem
 from .dir_sync_utils import derive_dir_sync_slug, find_record, flat_relative_markdown_path, reserve_unique_slug
@@ -410,6 +410,7 @@ def build_dir_sync_plan(
         for record in remote_records
         if record.get("doc_slug") not in (None, "")
     }
+    remote_detail_fetch_count = 0
 
     items: List[SyncPlanItem] = []
     matched_remote_ids: Set[str] = set()
@@ -428,6 +429,9 @@ def build_dir_sync_plan(
             )
         )
         if remote and remote.get("doc_id"):
+            remote, detail_fetched = ensure_remote_markdown_record_detail(client, repo_ref, remote)
+            if detail_fetched:
+                remote_detail_fetch_count += 1
             matched_remote_ids.add(str(remote["doc_id"]))
             base_entry = find_base_entry(index_maps, local=local, remote=remote)
         items.append(
@@ -490,6 +494,11 @@ def build_dir_sync_plan(
             "summary": summary,
             "index_found": index_path.exists(),
             "review": review_summary,
+            "remote_fetch": {
+                "summary_count": len(remote_records),
+                "detail_fetch_count": remote_detail_fetch_count,
+                "detail_fetch_saved_count": max(0, len(remote_records) - remote_detail_fetch_count),
+            },
         },
         "operations": [
             item["operation"]

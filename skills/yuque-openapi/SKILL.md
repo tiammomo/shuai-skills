@@ -16,6 +16,13 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 - Require explicit user confirmation for destructive delete operations.
 - Treat TOC rewrites as source-of-truth operations. Keep the automatic snapshot enabled unless an equivalent backup already exists.
 
+## Progressive Loading
+
+- Stay in this file for routing, safety, and command selection.
+- Read only the one `references/*.md` file that matches the current CRUD, dir-sync, TOC, manifest, or troubleshooting question.
+- Load only `scripts/yuque_api.py`, `scripts/check_yuque_skill.py`, or `scripts/yuque_api_lib/*` when you need to execute, verify, or patch the implementation.
+- Do not preload every Yuque reference file. Start from the narrowest workflow and pull in another reference only if the task crosses boundaries.
+
 ## Task Router
 
 - Discover spaces, repos, docs, or basic CRUD behavior:
@@ -23,7 +30,7 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 - Sync one markdown file to or from Yuque:
   Use `push-markdown` or `pull-markdown`, then read [references/repo-doc-crud.md](./references/repo-doc-crud.md) if payload or lookup rules matter.
 - Sync a whole markdown directory with a repo:
-  Start with `plan-dir-markdown`; add `--include-diff` when the review output should also show truncated unified diffs for divergent local vs remote markdown bodies, then read [references/dir-sync.md](./references/dir-sync.md).
+Start with `plan-dir-markdown`; add `--include-diff` when the review output should also show truncated unified diffs for divergent local vs remote markdown bodies, and add `--write-review review.md` when the run should also leave behind a Markdown review report for async approval or audit trails. The planner now keeps remote detail fetches on demand for matched docs only, so large repos do not need to hydrate every remote body up front, then read [references/dir-sync.md](./references/dir-sync.md).
 - Rebuild only the remote hierarchy or TOC:
   Use `sync-dir-toc` or `push-dir-markdown --sync-toc`, then read [references/toc-sync.md](./references/toc-sync.md).
 - Restore a repo from an automatic snapshot:
@@ -59,7 +66,7 @@ Use the bundled Python CLI for repeatable Yuque sync workflows. It uses only the
 ## Bundled Resources
 
 - `scripts/yuque_api.py`: stable cross-platform CLI entrypoint.
-- `scripts/selftest_yuque_api.py`: offline regression checks for planning, diff previews, manifest execution, TOC sync, and backup protections.
+- `scripts/selftest_yuque_api.py`: offline regression checks for planning, lazy remote detail fetches, diff previews, review-report output, manifest execution, TOC sync, and backup protections.
 - `scripts/check_yuque_skill.py`: one-click local check runner for selftests, skill validation, and CLI help smoke tests. It exits non-zero on failures, so it is ready to wire into CI.
 - `scripts/yuque_api_lib/`: implementation modules for the CLI. Read only when patching or debugging the skill itself.
 - `assets/manifests/`: starter manifest templates for common pull, push, and export workflows.
